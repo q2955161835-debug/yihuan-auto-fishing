@@ -15,6 +15,7 @@ class Event(Enum):
     READY_DETECTED = auto()
     INTERVAL_ELAPSED = auto()
     RESUME_CONTROL = auto()
+    RESUME_RESULT = auto()
     RESUME_READY = auto()
 
 
@@ -27,6 +28,7 @@ TRANSITIONS = {
     (FishingState.DISMISS_RESULT, Event.RESULT_CLICKED): FishingState.DISMISS_RESULT,
     (FishingState.INTER_ROUND, Event.INTERVAL_ELAPSED): FishingState.READY,
     (FishingState.PAUSED, Event.RESUME_CONTROL): FishingState.CONTROL,
+    (FishingState.PAUSED, Event.RESUME_RESULT): FishingState.WAIT_RESULT,
     (FishingState.PAUSED, Event.RESUME_READY): FishingState.READY,
 }
 
@@ -94,6 +96,9 @@ class FishingStateMachine:
             self.result_clicked = True
         else:
             self.result_clicked = False
+
+        if event is Event.RESUME_RESULT:
+            self.pause_reason = ""
 
         self.state = next_state
         self.entered_at = now

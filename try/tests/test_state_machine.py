@@ -228,6 +228,46 @@ def test_pause_records_reason_and_original_state_then_resumes_by_classification(
     assert state_machine.entered_at == 13.0
 
 
+def test_wait_result_pause_can_resume_for_result_reconfirmation() -> None:
+    state_machine = reach_state(FishingState.WAIT_RESULT)
+    state_machine.pause("窗口失去前台", 11.0)
+
+    state_machine.handle(Event.RESUME_RESULT, 12.0)
+
+    assert state_machine.state is FishingState.WAIT_RESULT
+    assert state_machine.result_clicked is False
+    assert state_machine.entered_at == 12.0
+    assert state_machine.pause_reason == ""
+
+
+@pytest.mark.parametrize("clicked", [False, True])
+def test_dismiss_result_pause_resumes_via_wait_result_without_old_click(
+    clicked: bool,
+) -> None:
+    state_machine = reach_state(FishingState.DISMISS_RESULT)
+    if clicked:
+        state_machine.handle(Event.RESULT_CLICKED, 10.5)
+        assert state_machine.result_clicked is True
+
+    state_machine.pause("F8", 11.0)
+    state_machine.handle(Event.RESUME_RESULT, 12.0)
+
+    assert state_machine.state is FishingState.WAIT_RESULT
+    assert state_machine.result_clicked is False
+    assert state_machine.entered_at == 12.0
+    assert state_machine.pause_reason == ""
+
+
+def test_resume_result_outside_paused_state_is_atomic_failure() -> None:
+    state_machine = reach_state(FishingState.WAIT_RESULT)
+    before = stateful_values(state_machine)
+
+    with pytest.raises(ValueError, match="RESUME_RESULT"):
+        state_machine.handle(Event.RESUME_RESULT, 12.0)
+
+    assert stateful_values(state_machine) == before
+
+
 @pytest.mark.parametrize("resume_event", [Event.RESUME_CONTROL, Event.RESUME_READY])
 def test_pause_and_resume_classification_clear_result_click_marker(
     resume_event: Event,
