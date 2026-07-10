@@ -129,6 +129,18 @@ class RecordingWindowService:
         return self.refreshed
 
 
+class ForegroundDropsAfterStartWindowService(RecordingWindowService):
+    """Allow start's foreground confirmation, then model a game focus loss."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.foreground_checks = 0
+
+    def is_foreground(self, bound: BoundWindow) -> bool:
+        self.foreground_checks += 1
+        return self.foreground_checks == 1 and super().is_foreground(bound)
+
+
 class ActivatingWindowService(RecordingWindowService):
     def __init__(self, events: list[str]) -> None:
         super().__init__()
@@ -922,13 +934,15 @@ def test_engine_classifies_failures_and_saves_one_diagnostic(
     tmp_path, failure_kind: str, expected_code: str
 ) -> None:
     input_service = RecordingInput()
-    window_service = RecordingWindowService()
+    window_service = (
+        ForegroundDropsAfterStartWindowService()
+        if failure_kind == "window"
+        else RecordingWindowService()
+    )
     recognizer = ScriptedRecognizer()
-    if failure_kind == "window":
-        window_service.foreground = False
-    elif failure_kind == "input":
+    if failure_kind == "input":
         input_service.failure = InputFailure("SendInput failed")
-    else:
+    elif failure_kind == "vision":
         recognizer.error = RuntimeError("recognizer failed")
     engine, core, input_service, _window, _source = make_engine(
         tmp_path,
@@ -1022,14 +1036,16 @@ def test_engine_safety_release_failure_overrides_cause_with_input_error(
     tmp_path, failure_kind: str
 ) -> None:
     input_service = ReleaseFailingInput()
-    window_service = RecordingWindowService()
+    window_service = (
+        ForegroundDropsAfterStartWindowService()
+        if failure_kind == "window"
+        else RecordingWindowService()
+    )
     recognizer = ScriptedRecognizer()
     source: FreshFrameSource = FreshFrameSource()
-    if failure_kind == "window":
-        window_service.foreground = False
-    elif failure_kind == "vision":
+    if failure_kind == "vision":
         recognizer.error = RuntimeError("vision root cause")
-    else:
+    elif failure_kind == "stale":
         source = FixedFrameSource(time.monotonic() - 0.6)
     engine, core, _input, _window, _source = make_engine(
         tmp_path,
@@ -1163,6 +1179,26 @@ def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> No
     assert core.snapshot.state is FishingState.DISMISS_RESULT
     assert not any(isinstance(event, tuple) for event in input_service.events)
     engine.shutdown()
+
+
+def test_engine_start_activates_game_before_worker_checks_foreground(
+    tmp_path,
+) -> None:
+    events: list[str] = []
+    window_service = ActivatingWindowService(events)
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+
+    engine.start(1)
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+
+        assert events[:2] == ["activate", "foreground"]
+        assert window_service.activate_calls >= 1
+    finally:
+        engine.shutdown()
 
 
 def test_resume_activates_game_and_keeps_request_until_third_stable_frame(

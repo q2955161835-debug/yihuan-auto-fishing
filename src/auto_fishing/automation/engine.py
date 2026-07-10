@@ -378,6 +378,25 @@ class AutomationEngine:
                 raise RuntimeError("自动化已在运行")
             if self._shutdown_started and not self._cleanup_done.is_set():
                 raise RuntimeError("自动化仍在关闭中")
+            bound = self._bound
+
+        try:
+            activated = bool(self.window_service.activate(bound))
+            foreground = activated and bool(
+                self.window_service.is_foreground(bound)
+            )
+        except Exception as error:
+            raise RuntimeError(f"无法激活游戏窗口: {error}") from error
+        if not foreground:
+            raise RuntimeError("无法激活并确认已绑定的游戏窗口")
+
+        with self._lifecycle_lock:
+            if self._bound is not bound:
+                raise RuntimeError("绑定窗口已变化，请重新开始")
+            if self.is_running or self._starting or self._cancelling:
+                raise RuntimeError("自动化已在运行")
+            if self._shutdown_started and not self._cleanup_done.is_set():
+                raise RuntimeError("自动化仍在关闭中")
             self._shutdown_started = False
             self._cleanup_thread = None
             self._closing = False
