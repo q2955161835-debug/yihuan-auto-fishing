@@ -309,6 +309,9 @@ class AutomationEngine:
         self._start_resolved.set()
         self._thread_start_done = threading.Event()
         self._thread_start_done.set()
+        self._start_decided = threading.Event()
+        self._start_decided.set()
+        self._start_allowed = False
         self._starting = False
         self._closing = False
         self._shutdown_started = False
@@ -355,8 +358,11 @@ class AutomationEngine:
             self._starting = True
             self._start_resolved = threading.Event()
             self._thread_start_done = threading.Event()
+            self._start_decided = threading.Event()
+            self._start_allowed = False
             start_resolved = self._start_resolved
             thread_start_done = self._thread_start_done
+            start_decided = self._start_decided
             with self._pause_lock:
                 self._pause_epoch += 1
                 self._resume_request = None
@@ -377,6 +383,9 @@ class AutomationEngine:
                 self._starting = False
                 start_resolved.set()
                 thread_start_done.set()
+                with self._pause_lock:
+                    self._start_allowed = False
+                    start_decided.set()
             if core_started:
                 self._pause(
                     "E_AUTOMATION",
@@ -396,12 +405,15 @@ class AutomationEngine:
                 self._starting = False
                 start_resolved.set()
                 thread_start_done.set()
+                with self._pause_lock:
+                    self._start_allowed = False
+                    start_decided.set()
             raise RuntimeError("startup cancelled by pause or shutdown")
 
         try:
             worker = threading.Thread(
                 target=self._run_after_publish,
-                args=(publish_done, start_epoch),
+                args=(publish_done, start_decided),
                 name="auto-fishing-worker",
                 daemon=True,
             )
@@ -410,6 +422,9 @@ class AutomationEngine:
                 self._starting = False
                 start_resolved.set()
                 thread_start_done.set()
+                with self._pause_lock:
+                    self._start_allowed = False
+                    start_decided.set()
             self._pause(
                 "E_AUTOMATION",
                 f"无法准备自动化工作线程: {error}",
@@ -433,6 +448,9 @@ class AutomationEngine:
                 self._starting = False
                 start_resolved.set()
                 thread_start_done.set()
+            with self._pause_lock:
+                self._start_allowed = False
+                start_decided.set()
             raise RuntimeError("startup cancelled by pause or shutdown")
         start_resolved.set()
 
@@ -445,6 +463,9 @@ class AutomationEngine:
                     self._thread = None
                 self._starting = False
                 thread_start_done.set()
+            with self._pause_lock:
+                self._start_allowed = False
+                start_decided.set()
             publish_done.set()
             raise RuntimeError("startup cancelled by pause or shutdown")
 
@@ -474,6 +495,19 @@ class AutomationEngine:
         finally:
             publish_done.set()
 
+        with self._pause_lock:
+            start_allowed = (
+                not self._closing and self._pause_epoch == start_epoch
+            )
+            self._start_allowed = start_allowed
+            start_decided.set()
+        if not start_allowed:
+            worker.join()
+            with self._lifecycle_lock:
+                if self._thread is worker:
+                    self._thread = None
+            raise RuntimeError("startup cancelled during initial publish")
+
     def pause(self, reason: str) -> None:
         frame = (
             None
@@ -485,7 +519,7 @@ class AutomationEngine:
     def resume(self) -> None:
         with self._pause_lock:
             requested_epoch = self._pause_epoch
-            if self._closing:
+            if self._closing or self._start_allowed is not True:
                 return
         snapshot = self.core.snapshot
         with self._pause_lock:
@@ -672,11 +706,12 @@ class AutomationEngine:
     def _run_after_publish(
         self,
         publish_done: threading.Event,
-        start_epoch: int,
+        start_decided: threading.Event,
     ) -> None:
         publish_done.wait()
+        start_decided.wait()
         with self._pause_lock:
-            if self._closing or self._pause_epoch != start_epoch:
+            if self._start_allowed is not True:
                 return
         self._run()
 

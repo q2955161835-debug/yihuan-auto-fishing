@@ -1148,7 +1148,88 @@ def test_start_ready_callback_does_not_hold_lifecycle_lock_from_shutdown(
     assert callback_returned.wait(timeout=1)
     assert engine._cleanup_done.wait(timeout=1)
     assert start_thread.is_alive() is False
-    assert start_errors == []
+    assert len(start_errors) == 1
+    assert "cancel" in str(start_errors[0]).lower()
+
+
+def test_pause_during_ready_publish_explicitly_cancels_start_and_resume(
+    tmp_path,
+) -> None:
+    callback_entered = threading.Event()
+    allow_callback = threading.Event()
+    start_errors: list[BaseException] = []
+    engine, core, input_service, _window, source = make_engine(tmp_path)
+
+    def subscriber(snapshot) -> None:
+        if snapshot.state is FishingState.READY:
+            callback_entered.set()
+            assert allow_callback.wait(timeout=1)
+
+    def start_engine() -> None:
+        try:
+            engine.start(1)
+        except BaseException as error:
+            start_errors.append(error)
+
+    engine.subscribe(subscriber)
+    start_thread = threading.Thread(target=start_engine)
+    start_thread.start()
+    assert callback_entered.wait(timeout=1)
+
+    engine.pause("F8 pause during READY publish")
+    allow_callback.set()
+    start_thread.join(timeout=1)
+    engine.resume()
+
+    try:
+        assert start_thread.is_alive() is False
+        assert len(start_errors) == 1
+        assert "cancel" in str(start_errors[0]).lower()
+        assert core.snapshot.state is FishingState.PAUSED
+        assert core.input_blocked is True
+        assert engine._resume_request is None
+        assert engine.is_running is False
+        assert "F" not in input_service.events
+        assert source.started == []
+    finally:
+        engine.shutdown()
+
+
+def test_pause_after_start_allowed_latch_keeps_worker_resumable(tmp_path) -> None:
+    source = StartStopRaceFrameSource()
+    recognizer = ScriptedRecognizer()
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        frame_source=source,
+        recognizer=recognizer,
+    )
+    start_errors: list[BaseException] = []
+
+    def start_engine() -> None:
+        try:
+            engine.start(1)
+        except BaseException as error:
+            start_errors.append(error)
+
+    start_thread = threading.Thread(target=start_engine)
+    start_thread.start()
+    assert engine._start_decided.wait(timeout=1)
+    assert engine._start_allowed is True
+    assert source.start_entered.wait(timeout=1)
+    start_thread.join(timeout=1)
+
+    engine.pause("pause after allowed latch")
+    recognizer.observations.append(SceneObservation(ready=True))
+    engine.resume()
+    source.allow_start.set()
+    wait_until(lambda: input_service.events.count("F") == 1)
+
+    try:
+        assert start_errors == []
+        assert core.snapshot.state is FishingState.WAIT_BITE
+        assert engine.is_running is True
+    finally:
+        engine.shutdown()
 
 
 def test_start_thread_construction_failure_rolls_back_ready_core(
