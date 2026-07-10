@@ -1087,6 +1087,71 @@ def test_shutdown_budget_includes_blocking_subscriber_callback(tmp_path) -> None
     assert engine._cleanup_done.wait(timeout=1)
 
 
+def test_start_ready_callback_does_not_hold_lifecycle_lock_from_shutdown(
+    tmp_path,
+) -> None:
+    callback_entered = threading.Event()
+    allow_callback = threading.Event()
+    callback_returned = threading.Event()
+    start_errors: list[BaseException] = []
+    engine, _core, _input, _window, _source = make_engine(tmp_path)
+
+    def subscriber(snapshot) -> None:
+        if snapshot.state is FishingState.READY:
+            callback_entered.set()
+            allow_callback.wait(timeout=2.2)
+            callback_returned.set()
+
+    def start_engine() -> None:
+        try:
+            engine.start(1)
+        except BaseException as error:
+            start_errors.append(error)
+
+    engine.subscribe(subscriber)
+    start_thread = threading.Thread(target=start_engine)
+    start_thread.start()
+    assert callback_entered.wait(timeout=1)
+
+    started = time.monotonic()
+    engine.shutdown()
+    elapsed = time.monotonic() - started
+    repeated = time.monotonic()
+    engine.shutdown()
+    repeated_elapsed = time.monotonic() - repeated
+    allow_callback.set()
+    start_thread.join(timeout=1)
+
+    assert elapsed < 2.1
+    assert repeated_elapsed < 0.1
+    assert callback_returned.wait(timeout=1)
+    assert engine._cleanup_done.wait(timeout=1)
+    assert start_thread.is_alive() is False
+    assert start_errors == []
+
+
+def test_start_thread_construction_failure_rolls_back_ready_core(
+    tmp_path, monkeypatch
+) -> None:
+    original_thread = threading.Thread
+    engine, core, input_service, _window, _source = make_engine(tmp_path)
+
+    def thread_factory(*args, **kwargs):
+        if kwargs.get("name") == "auto-fishing-worker":
+            raise RuntimeError("thread construction failed")
+        return original_thread(*args, **kwargs)
+
+    monkeypatch.setattr(threading, "Thread", thread_factory)
+
+    with pytest.raises(RuntimeError, match="thread construction failed"):
+        engine.start(1)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.input_blocked is True
+    assert input_service.events[-1] == "release"
+    assert engine.is_running is False
+
+
 def test_shutdown_budget_includes_core_process_holding_lock(tmp_path) -> None:
     input_service = ShutdownBlockingInput(block_tap=True)
     input_service.allow_release.set()

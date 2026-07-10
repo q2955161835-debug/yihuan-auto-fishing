@@ -297,6 +297,11 @@ class AutomationEngine:
         self._cleanup_thread: threading.Thread | None = None
         self._cleanup_done = threading.Event()
         self._cleanup_done.set()
+        self._start_resolved = threading.Event()
+        self._start_resolved.set()
+        self._thread_start_done = threading.Event()
+        self._thread_start_done.set()
+        self._starting = False
         self._closing = False
         self._shutdown_started = False
         self._shutdown_event = threading.Event()
@@ -321,7 +326,7 @@ class AutomationEngine:
 
     def bind(self, bound: Any) -> None:
         with self._lifecycle_lock:
-            if self.is_running:
+            if self.is_running or self._starting:
                 raise RuntimeError("自动化运行中不能更换绑定窗口")
             self._bound = bound
 
@@ -329,7 +334,7 @@ class AutomationEngine:
         with self._lifecycle_lock:
             if self._bound is None:
                 raise RuntimeError("请先绑定游戏窗口")
-            if self.is_running:
+            if self.is_running or self._starting:
                 raise RuntimeError("自动化已在运行")
             if self._shutdown_started and not self._cleanup_done.is_set():
                 raise RuntimeError("自动化仍在关闭中")
@@ -337,20 +342,79 @@ class AutomationEngine:
             self._cleanup_thread = None
             self._closing = False
             self._shutdown_event.clear()
+            self._starting = True
+            self._start_resolved = threading.Event()
+            self._thread_start_done = threading.Event()
+            start_resolved = self._start_resolved
+            thread_start_done = self._thread_start_done
             with self._pause_lock:
                 self._pause_epoch += 1
                 self._resume_request = None
             self._diagnostic_recorded = False
             self._last_frame = None
             self._last_refresh = float("-inf")
+
+        publish_done = threading.Event()
+        core_started = False
+        try:
             self.core.start(target, self.clock())
-            self._publish()
-            self._thread = threading.Thread(
-                target=self._run,
+            core_started = True
+            worker = threading.Thread(
+                target=self._run_after_publish,
+                args=(publish_done,),
                 name="auto-fishing-worker",
                 daemon=True,
             )
-            self._thread.start()
+        except BaseException as error:
+            with self._lifecycle_lock:
+                self._starting = False
+                start_resolved.set()
+                thread_start_done.set()
+            if core_started:
+                self._pause(
+                    "E_AUTOMATION",
+                    f"无法准备自动化工作线程: {error}",
+                    None,
+                    save_diagnostic=False,
+                )
+            raise
+
+        with self._lifecycle_lock:
+            cancelled = self._closing or self._shutdown_started
+            if not cancelled:
+                self._thread = worker
+            self._starting = False if cancelled else self._starting
+            start_resolved.set()
+            if cancelled:
+                thread_start_done.set()
+        if cancelled:
+            raise RuntimeError("自动化启动已被关闭取消")
+
+        try:
+            worker.start()
+        except BaseException as error:
+            with self._lifecycle_lock:
+                if self._thread is worker:
+                    self._thread = None
+                self._starting = False
+                thread_start_done.set()
+            publish_done.set()
+            self._pause(
+                "E_AUTOMATION",
+                f"无法启动自动化工作线程: {error}",
+                None,
+                save_diagnostic=False,
+            )
+            raise
+        else:
+            with self._lifecycle_lock:
+                self._starting = False
+                thread_start_done.set()
+
+        try:
+            self._publish()
+        finally:
+            publish_done.set()
 
     def pause(self, reason: str) -> None:
         frame = (
@@ -545,6 +609,10 @@ class AutomationEngine:
             if not self._closing:
                 self._stop_capture()
 
+    def _run_after_publish(self, publish_done: threading.Event) -> None:
+        publish_done.wait()
+        self._run()
+
     def _pause(
         self,
         code: str,
@@ -579,6 +647,7 @@ class AutomationEngine:
 
     def _cleanup_shutdown(self) -> None:
         try:
+            self._start_resolved.wait()
             self._pause(
                 "E_USER_PAUSE",
                 "程序关闭",
@@ -586,6 +655,7 @@ class AutomationEngine:
                 save_diagnostic=False,
             )
             self._stop_capture()
+            self._thread_start_done.wait()
             worker = self._thread
             if worker is not None and worker is not threading.current_thread():
                 worker.join()
