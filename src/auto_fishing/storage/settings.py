@@ -19,6 +19,8 @@ class SettingsStore:
             return AppSettings()
         try:
             raw = json.loads(self.path.read_text("utf-8"))
+            if not isinstance(raw, dict):
+                return AppSettings()
             count = min(999, max(1, int(raw.get("target_count", 1))))
             return AppSettings(
                 count,

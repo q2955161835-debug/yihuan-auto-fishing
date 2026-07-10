@@ -20,7 +20,15 @@ class DiagnosticsStore:
     ) -> str:
         now = now or datetime.now(timezone.utc)
         self.root.mkdir(parents=True, exist_ok=True)
-        stem = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}_{code}"
+        base_stem = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}_{code}"
+        stem = base_stem
+        sequence = 1
+        while any(
+            (self.root / f"{stem}{suffix}").exists()
+            for suffix in (".png", ".json")
+        ):
+            stem = f"{base_stem}_{sequence}"
+            sequence += 1
         image_path = self.root / f"{stem}.png"
         meta_path = self.root / f"{stem}.json"
         if not cv2.imwrite(str(image_path), frame):
