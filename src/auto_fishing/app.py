@@ -124,10 +124,10 @@ class AppController:
         if cancelled is not None:
             cancelled("开始倒计时已取消")
         with self._command_condition:
-            if self._starting or self.engine.is_running:
+            paused = self._state is FishingState.PAUSED
+            if self._starting or (self.engine.is_running and not paused):
                 on_done(None, "自动化已在启动或运行，不能重新绑定")
                 return
-            paused = self._state is FishingState.PAUSED
         if paused:
             if not self._begin_command():
                 return

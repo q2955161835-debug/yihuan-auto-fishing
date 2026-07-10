@@ -218,6 +218,7 @@ def test_paused_window_rebind_cancels_current_round_before_countdown(root) -> No
     engine.publish(
         RuntimeSnapshot(FishingState.PAUSED, 0, 2, 0.0, "窗口已失效")
     )
+    engine.running = True
     window.apply_snapshot(
         RuntimeSnapshot(FishingState.PAUSED, 0, 2, 0.0, "窗口已失效")
     )
