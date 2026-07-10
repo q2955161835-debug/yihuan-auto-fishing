@@ -78,6 +78,31 @@ class BarrierInput(RecordingInput):
         super().tap_f()
 
 
+class ShutdownBlockingInput(RecordingInput):
+    def __init__(self, *, block_tap: bool = False) -> None:
+        super().__init__()
+        self.block_tap = block_tap
+        self.tap_entered = threading.Event()
+        self.tap_returned = threading.Event()
+        self.release_entered = threading.Event()
+        self.release_returned = threading.Event()
+        self.allow_tap = threading.Event()
+        self.allow_release = threading.Event()
+
+    def tap_f(self) -> None:
+        if self.block_tap:
+            self.tap_entered.set()
+            self.allow_tap.wait(timeout=2.2)
+            self.tap_returned.set()
+        super().tap_f()
+
+    def release_all(self) -> None:
+        self.release_entered.set()
+        self.allow_release.wait(timeout=2.2)
+        self.release_returned.set()
+        super().release_all()
+
+
 class RecordingWindowService:
     def __init__(self) -> None:
         self.foreground = True
@@ -165,11 +190,13 @@ class BlockingStopFrameSource(FreshFrameSource):
         super().__init__()
         self.stop_entered = threading.Event()
         self.allow_stop = threading.Event()
+        self.stop_returned = threading.Event()
 
     def stop(self) -> None:
         self.stop_calls += 1
         self.stop_entered.set()
         self.allow_stop.wait(timeout=5)
+        self.stop_returned.set()
 
 
 class StartStopRaceFrameSource(FreshFrameSource):
@@ -270,6 +297,59 @@ class CapturedBarrierRecognizer(ScriptedRecognizer):
         self.entered.set()
         assert self.allow.wait(timeout=1)
         return result
+
+
+class AbaRecognizer(ScriptedRecognizer):
+    def __init__(self) -> None:
+        super().__init__([SceneObservation()])
+        self.block_a = False
+        self.a_entered = threading.Event()
+        self.allow_a = threading.Event()
+        self.a_returned = threading.Event()
+        self.b_entered = threading.Event()
+        self.allow_b = threading.Event()
+        self.b_returned = threading.Event()
+
+    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+        if self.block_a:
+            self.block_a = False
+            result = SceneObservation(ready=True)
+            self.a_entered.set()
+            assert self.allow_a.wait(timeout=1)
+            self.a_returned.set()
+            return result
+        if self.a_returned.is_set() and not self.b_returned.is_set():
+            self.b_entered.set()
+            assert self.allow_b.wait(timeout=1)
+            self.b_returned.set()
+            return SceneObservation(result=True)
+        return super().observe(frame, timestamp)
+
+
+class SnapshotBarrierCore:
+    def __init__(self, core: AutomationCore) -> None:
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "armed", False)
+        object.__setattr__(self, "snapshot_entered", threading.Event())
+        object.__setattr__(self, "allow_snapshot", threading.Event())
+
+    def __getattr__(self, name: str):
+        return getattr(self.core, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in {"core", "armed", "snapshot_entered", "allow_snapshot"}:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.core, name, value)
+
+    @property
+    def snapshot(self):
+        snapshot = self.core.snapshot
+        if self.armed:
+            self.armed = False
+            self.snapshot_entered.set()
+            assert self.allow_snapshot.wait(timeout=1)
+        return snapshot
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
@@ -720,7 +800,8 @@ def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> No
         raise AssertionError(
             f"snapshot={core.snapshot!r}, events={input_service.events!r}, "
             f"remaining={recognizer.observations!r}, "
-            f"resume_requested={engine._resume_requested.is_set()}, "
+            f"resume_request={engine._resume_request!r}, "
+            f"pause_epoch={engine._pause_epoch}, "
             f"running={engine.is_running}"
         ) from error
 
@@ -798,6 +879,65 @@ def test_pause_cancels_inflight_resume_request_before_returning(tmp_path) -> Non
     engine.shutdown()
 
 
+def test_resume_aba_does_not_let_request_a_consume_request_b(tmp_path) -> None:
+    recognizer = AbaRecognizer()
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path, recognizer=recognizer
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.pause("pause for request A")
+    recognizer.block_a = True
+    engine.resume()
+    assert recognizer.a_entered.wait(timeout=1)
+
+    engine.pause("invalidate request A")
+    engine.resume()
+    recognizer.allow_a.set()
+    assert recognizer.a_returned.wait(timeout=1)
+    assert recognizer.b_entered.wait(timeout=1)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert input_service.events.count("F") == 1
+
+    recognizer.allow_b.set()
+    assert recognizer.b_returned.wait(timeout=1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_RESULT)
+    engine.shutdown()
+
+
+def test_old_resume_cannot_publish_request_after_new_pause_returns(tmp_path) -> None:
+    source = BlockingFrameSource(unblock_on_stop=False)
+    recognizer = ScriptedRecognizer([SceneObservation(ready=True)])
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path, frame_source=source, recognizer=recognizer
+    )
+    engine.start(1)
+    assert source.entered.wait(timeout=1)
+    core.pause("initial pause", time.monotonic())
+    proxy = SnapshotBarrierCore(core)
+    proxy.armed = True
+    engine.core = proxy
+    resume_thread = threading.Thread(target=engine.resume)
+    resume_thread.start()
+    assert proxy.snapshot_entered.wait(timeout=1)
+
+    pause_returned = threading.Event()
+    pause_thread = threading.Thread(
+        target=lambda: (engine.pause("new pause"), pause_returned.set())
+    )
+    pause_thread.start()
+    pause_returned.wait(timeout=0.05)
+    proxy.allow_snapshot.set()
+    resume_thread.join(timeout=1)
+    pause_thread.join(timeout=1)
+    source.unblock.set()
+    time.sleep(0.05)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    engine.shutdown()
+
+
 def test_unexpected_core_failure_still_blocks_and_releases_input(tmp_path) -> None:
     progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 0.0)
     recognizer = ScriptedRecognizer(
@@ -862,8 +1002,10 @@ def test_shutdown_total_budget_includes_blocking_stop_and_is_reused(tmp_path) ->
     source.allow_stop.set()
 
     assert source.stop_entered.is_set()
-    assert first_elapsed < 2.2
+    assert first_elapsed < 2.1
     assert repeated_elapsed < 0.1
+    assert source.stop_returned.wait(timeout=1)
+    assert engine._cleanup_done.wait(timeout=1)
 
 
 def test_shutdown_cannot_stop_before_inflight_capture_start_finishes(tmp_path) -> None:
@@ -898,6 +1040,70 @@ def test_shutdown_release_failure_finishes_paused_with_input_error(tmp_path) -> 
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_INPUT"
     assert "key release failed" in core.snapshot.error
+
+
+def test_shutdown_budget_includes_blocking_release_all(tmp_path) -> None:
+    input_service = ShutdownBlockingInput()
+    input_service.allow_release.clear()
+    engine, _core, _input, _window, _source = make_engine(
+        tmp_path, input_service=input_service
+    )
+    engine.start(1)
+    wait_until(lambda: "F" in input_service.events)
+
+    started = time.monotonic()
+    engine.shutdown()
+    elapsed = time.monotonic() - started
+    input_service.allow_release.set()
+
+    assert elapsed < 2.1
+    assert input_service.release_returned.wait(timeout=1)
+    assert engine._cleanup_done.wait(timeout=1)
+
+
+def test_shutdown_budget_includes_blocking_subscriber_callback(tmp_path) -> None:
+    callback_entered = threading.Event()
+    allow_callback = threading.Event()
+    callback_returned = threading.Event()
+    engine, _core, _input, _window, _source = make_engine(tmp_path)
+
+    def subscriber(snapshot) -> None:
+        if snapshot.state is FishingState.PAUSED:
+            callback_entered.set()
+            allow_callback.wait(timeout=2.2)
+            callback_returned.set()
+
+    engine.subscribe(subscriber)
+    engine.start(1)
+
+    started = time.monotonic()
+    engine.shutdown()
+    elapsed = time.monotonic() - started
+    allow_callback.set()
+
+    assert callback_entered.is_set()
+    assert elapsed < 2.1
+    assert callback_returned.wait(timeout=1)
+    assert engine._cleanup_done.wait(timeout=1)
+
+
+def test_shutdown_budget_includes_core_process_holding_lock(tmp_path) -> None:
+    input_service = ShutdownBlockingInput(block_tap=True)
+    input_service.allow_release.set()
+    engine, _core, _input, _window, _source = make_engine(
+        tmp_path, input_service=input_service
+    )
+    engine.start(1)
+    assert input_service.tap_entered.wait(timeout=1)
+
+    started = time.monotonic()
+    engine.shutdown()
+    elapsed = time.monotonic() - started
+    input_service.allow_tap.set()
+
+    assert elapsed < 2.1
+    assert input_service.tap_returned.wait(timeout=1)
+    assert engine._cleanup_done.wait(timeout=1)
 
 
 def test_shutdown_does_not_block_past_two_seconds_for_stuck_worker(tmp_path) -> None:

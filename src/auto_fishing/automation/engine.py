@@ -294,15 +294,18 @@ class AutomationEngine:
         self.logger = logger or logging.getLogger(__name__)
         self._bound: Any | None = None
         self._thread: threading.Thread | None = None
-        self._capture_stop_thread: threading.Thread | None = None
-        self._capture_stop_done = threading.Event()
+        self._cleanup_thread: threading.Thread | None = None
+        self._cleanup_done = threading.Event()
+        self._cleanup_done.set()
+        self._closing = False
         self._shutdown_started = False
         self._shutdown_event = threading.Event()
-        self._resume_requested = threading.Event()
+        self._pause_epoch = 0
+        self._resume_request: int | None = None
         self._callbacks: list[Callable[[RuntimeSnapshot], None]] = []
         self._lifecycle_lock = threading.RLock()
         self._capture_lock = threading.Lock()
-        self._pause_lock = threading.Lock()
+        self._pause_lock = threading.RLock()
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
         self._last_refresh = float("-inf")
@@ -328,13 +331,15 @@ class AutomationEngine:
                 raise RuntimeError("请先绑定游戏窗口")
             if self.is_running:
                 raise RuntimeError("自动化已在运行")
-            if self._shutdown_started and not self._capture_stop_done.is_set():
+            if self._shutdown_started and not self._cleanup_done.is_set():
                 raise RuntimeError("自动化仍在关闭中")
             self._shutdown_started = False
-            self._capture_stop_thread = None
-            self._capture_stop_done.clear()
+            self._cleanup_thread = None
+            self._closing = False
             self._shutdown_event.clear()
-            self._resume_requested.clear()
+            with self._pause_lock:
+                self._pause_epoch += 1
+                self._resume_request = None
             self._diagnostic_recorded = False
             self._last_frame = None
             self._last_refresh = float("-inf")
@@ -348,7 +353,6 @@ class AutomationEngine:
             self._thread.start()
 
     def pause(self, reason: str) -> None:
-        self._resume_requested.clear()
         frame = (
             None
             if reason.strip().upper().startswith("F8")
@@ -357,8 +361,18 @@ class AutomationEngine:
         self._pause("E_USER_PAUSE", reason, frame)
 
     def resume(self) -> None:
-        if self.core.snapshot.state is FishingState.PAUSED:
-            self._resume_requested.set()
+        with self._pause_lock:
+            requested_epoch = self._pause_epoch
+            if self._closing:
+                return
+        snapshot = self.core.snapshot
+        with self._pause_lock:
+            if (
+                not self._closing
+                and requested_epoch == self._pause_epoch
+                and snapshot.state is FishingState.PAUSED
+            ):
+                self._resume_request = requested_epoch
 
     def shutdown(self) -> None:
         deadline = time.monotonic() + 2.0
@@ -366,30 +380,23 @@ class AutomationEngine:
             if self._shutdown_started:
                 return
             self._shutdown_started = True
+            self._closing = True
             self._shutdown_event.set()
-            self._resume_requested.clear()
-            thread = self._thread
-        self._pause(
-            "E_USER_PAUSE",
-            "程序关闭",
-            self._last_frame,
-            save_diagnostic=False,
-        )
-        self._request_capture_stop()
+            with self._pause_lock:
+                self._pause_epoch += 1
+                self._resume_request = None
+            self._cleanup_done.clear()
+            self._cleanup_thread = threading.Thread(
+                target=self._cleanup_shutdown,
+                name="auto-fishing-cleanup",
+                daemon=True,
+            )
+            cleanup_thread = self._cleanup_thread
+            cleanup_thread.start()
 
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            if thread.is_alive():
-                self.logger.warning("自动化工作线程在 2 秒内未退出")
-            else:
-                with self._lifecycle_lock:
-                    if self._thread is thread:
-                        self._thread = None
-        self._capture_stop_done.wait(
-            timeout=max(0.0, deadline - time.monotonic())
-        )
-        if not self._capture_stop_done.is_set():
-            self.logger.warning("截屏清理在 2 秒内未退出")
+        cleanup_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if cleanup_thread.is_alive():
+            self.logger.warning("自动化清理在 2 秒内未退出")
 
     def _run(self) -> None:
         try:
@@ -446,12 +453,13 @@ class AutomationEngine:
                 if capture_restarted:
                     continue
 
-                resume_requested_for_observation = (
-                    self._resume_requested.is_set()
-                )
+                with self._pause_lock:
+                    resume_token = (
+                        None if self._closing else self._resume_request
+                    )
                 if (
                     self.core.snapshot.state is FishingState.PAUSED
-                    and not resume_requested_for_observation
+                    and resume_token is None
                 ):
                     self._shutdown_event.wait(0.005)
                     continue
@@ -469,17 +477,33 @@ class AutomationEngine:
                 if self.core.snapshot.state is FishingState.PAUSED:
                     with self._pause_lock:
                         resume_attempted = (
-                            resume_requested_for_observation
-                            and self._resume_requested.is_set()
+                            not self._closing
+                            and resume_token is not None
+                            and resume_token == self._resume_request
+                            and resume_token == self._pause_epoch
+                            and self.core.snapshot.state
+                            is FishingState.PAUSED
                         )
                         if resume_attempted:
-                            self._resume_requested.clear()
-                            resumed = self.core.resume(observation, now)
-                            if resumed:
-                                self._diagnostic_recorded = False
+                            if self._resume_request == resume_token:
+                                self._resume_request = None
                     if not resume_attempted:
                         self._shutdown_event.wait(0.005)
                         continue
+                    resumed = self.core.resume(observation, now)
+                    with self._pause_lock:
+                        resume_invalidated = (
+                            self._closing
+                            or resume_token != self._pause_epoch
+                        )
+                        if resumed and not resume_invalidated:
+                            self._diagnostic_recorded = False
+                    if resumed and resume_invalidated:
+                        self.core.pause(
+                            "恢复请求已失效",
+                            now,
+                            code="E_USER_PAUSE",
+                        )
                     self._publish()
                     self._shutdown_event.wait(0.001)
                     continue
@@ -518,7 +542,8 @@ class AutomationEngine:
         except Exception as error:
             self._pause("E_AUTOMATION", str(error), self._last_frame)
         finally:
-            self._request_capture_stop()
+            if not self._closing:
+                self._stop_capture()
 
     def _pause(
         self,
@@ -529,10 +554,14 @@ class AutomationEngine:
         save_diagnostic: bool = True,
     ) -> None:
         with self._pause_lock:
-            self.core.pause(detail, self.clock(), code=code)
-            actual_code = self.core.pause_code
-            actual_detail = self.core.snapshot.error
+            self._pause_epoch += 1
+            self._resume_request = None
+        self.core.pause(detail, self.clock(), code=code)
+        actual_code = self.core.pause_code
+        actual_detail = self.core.snapshot.error
 
+        save_diagnostic_now = False
+        with self._pause_lock:
             should_save = save_diagnostic or actual_code == "E_INPUT"
             if (
                 should_save
@@ -540,22 +569,31 @@ class AutomationEngine:
                 and frame is not None
             ):
                 self._diagnostic_recorded = True
-                try:
-                    self.diagnostics.save(frame, actual_code, actual_detail)
-                except Exception as error:
-                    self.logger.warning("保存诊断失败: %s", error)
+                save_diagnostic_now = True
+        if save_diagnostic_now:
+            try:
+                self.diagnostics.save(frame, actual_code, actual_detail)
+            except Exception as error:
+                self.logger.warning("保存诊断失败: %s", error)
         self._publish()
 
-    def _request_capture_stop(self) -> None:
-        with self._lifecycle_lock:
-            if self._capture_stop_thread is not None:
-                return
-            self._capture_stop_thread = threading.Thread(
-                target=self._stop_capture,
-                name="auto-fishing-capture-stop",
-                daemon=True,
+    def _cleanup_shutdown(self) -> None:
+        try:
+            self._pause(
+                "E_USER_PAUSE",
+                "程序关闭",
+                self._last_frame,
+                save_diagnostic=False,
             )
-            self._capture_stop_thread.start()
+            self._stop_capture()
+            worker = self._thread
+            if worker is not None and worker is not threading.current_thread():
+                worker.join()
+                with self._lifecycle_lock:
+                    if self._thread is worker:
+                        self._thread = None
+        finally:
+            self._cleanup_done.set()
 
     def _stop_capture(self) -> None:
         try:
@@ -563,8 +601,6 @@ class AutomationEngine:
                 self.frame_source.stop()
         except Exception as error:
             self.logger.warning("停止截屏失败: %s", error)
-        finally:
-            self._capture_stop_done.set()
 
     def _start_capture(self, device_index: int, output_index: int) -> bool:
         with self._capture_lock:
