@@ -2,14 +2,14 @@
 
 ## 项目状态
 
-- 当前阶段：设计规格与实施计划已确认并落盘，功能尚未实现。
+- 当前阶段：离线自动测试、单文件构建和发布物启动烟雾已完成，等待《异环》实机验收；在实机验收完成前不得合并主分支或发布。
 - 项目目标：提供 Windows 单文件可执行程序，通过画面识别和系统输入完成《异环》钓鱼循环。
 - 使用前提：自动化期间游戏保持前台，用户不操作鼠标键盘；F8 为全局紧急暂停键。
 - 范围边界：不读取游戏内存、不注入游戏进程、不规避反作弊，只使用屏幕截图和 Windows 标准输入接口。
 
 ## 技术栈与关键依赖
 
-- Python：桌面程序与自动化逻辑。
+- Python 3.13.x：桌面程序与自动化逻辑；本次离线构建环境为 Python 3.13.5。
 - Tkinter/ttk：小型置顶控制窗口。
 - DXcam：Windows Desktop Duplication 高频截屏，目标 30 帧/秒。
 - NumPy 与 OpenCV：关键区域颜色分割、连通区域和画面特征识别。
@@ -17,11 +17,11 @@
 - PyInstaller：生成单文件 Windows 可执行程序。
 - pytest：单元、状态机和合成帧回放测试。
 
-依赖版本在实施阶段固定到项目依赖文件；变更截屏、输入或打包依赖时，必须复测窗口、无边框和全屏模式。
+运行依赖固定为 DXcam 0.3.0、NumPy 2.4.1、opencv-python-headless 4.13.0.92；开发依赖固定为 pytest 9.1.0 和 PyInstaller 6.19.0。变更截屏、输入或打包依赖时，必须复测窗口、无边框和全屏模式。
 
 ## 架构与数据流
 
-计划模块边界如下：
+已实现模块边界如下：
 
 - `src/auto_fishing/ui/`：窗口、状态展示和用户操作，不包含识别与按键策略。
 - `src/auto_fishing/platform/`：Windows 窗口、DPI、热键和输入接口。
@@ -29,7 +29,10 @@
 - `src/auto_fishing/vision/`：上钩、进度条、黄色标记、绿色区域、结算和就绪画面识别。
 - `src/auto_fishing/automation/`：状态机、超时、循环计数、暂停与恢复。
 - `src/auto_fishing/storage/`：本地配置、日志和诊断文件自动清理。
+- `packaging/`：`asInvoker`、`PerMonitorV2` 清单和 PyInstaller 单文件规格；不得启用管理员权限或控制台子系统。
+- `scripts/build.ps1`：从项目 `.venv` 运行完整测试后构建单文件发布物并输出 SHA256。
 - `try/`：测试、合成帧、回放输入和临时产物；删除后不得影响正式程序。
+- `try/smoke_exe.ps1`：启动发布物、检查进程响应并关闭的离线烟雾脚本。
 - `流程截图/`：用户提供的带标注流程参考图，不作为可直接匹配的干净模板。
 - `doc/验收标准.md`：真实使用流程、验证证据和结论。
 - `doc/进展记录/`：按日期记录阶段性修改和异常。
@@ -50,28 +53,30 @@
 
 ## 本地数据与环境变量
 
-- 配置和诊断目录计划使用 `%LOCALAPPDATA%\异环自动钓鱼\`，不得写入敏感信息。
+- 配置和诊断目录使用 `%LOCALAPPDATA%\异环自动钓鱼\`，不得写入敏感信息；诊断清理只允许作用于其 `diagnostics` 子目录。
 - `.env` 是真实环境变量账本，已被 Git 忽略；当前项目不需要环境变量。
 - `.env.example` 是可提交的变量名账本；新增、删除或改名变量时同步更新读取逻辑与文档。
 
 ## 运行、测试与构建
 
-实施完成后保持以下命令可用；若命令变化，必须同步更新本文件：
+在项目根目录建立 Python 3.13 `.venv` 并安装固定依赖后，保持以下命令可用；若命令变化，必须同步更新本文件：
 
 ```powershell
-python -m pip install -r requirements-dev.txt
-python -m auto_fishing
-python -m pytest try/tests -q
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m auto_fishing
+.\.venv\Scripts\python.exe -m pytest try/tests -q
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+powershell -ExecutionPolicy Bypass -File try/smoke_exe.ps1
 ```
 
-预期发布物为 `dist/异环自动钓鱼.exe`。构建脚本必须可重复执行，发布前必须在无开发环境依赖的 Windows 会话中做启动冒烟测试。
+发布物为 `dist/异环自动钓鱼.exe`，`dist/` 保持 Git 忽略。构建脚本必须可重复执行；发布前除自动烟雾外，必须在无开发环境依赖的 Windows 会话中完成启动人工复核。
 
 ## 验收标准
 
 - 自动测试必须覆盖坐标缩放、状态超时、A/D 方向与释放、F8、安全暂停、循环计数和诊断清理。
 - 合成动态进度条以 30 帧/秒回放，识别与控制处理不得持续落后于最新帧。
 - 实机必须分别检查窗口、无边框和全屏；无法由自动测试判断的画面识别结果标记为人工确认。
+- 当前离线基线为 186 个 pytest 测试通过、单文件构建成功、启动/响应/关闭烟雾通过；这不替代真实游戏人工验收。
 - 完成一个阶段后同步更新 `doc/验收标准.md` 中的结果、问题和最终结论。
 
 ## 执行与报告要求
