@@ -1056,7 +1056,8 @@ git commit -m "feat: add explicit fishing state machine"
 
 **接口：**
 
-- 产出：`AutomationEngine.bind(bound)`、`start(target)`、`pause(reason)`、`resume()`、`shutdown()`。
+- 产出：`AutomationCore.start(target, now)`、`process(observation, packet, now, client_rect)`、`pause(reason, now)` 和 `snapshot`；这是线程无关的正式业务核心，工作线程直接调用它。
+- 产出：`AutomationEngine.bind(bound)`、`start(target)`、`pause(reason)`、`resume()`、`shutdown()`；只负责线程、截屏和窗口生命周期。
 - 产出：`subscribe(callback: Callable[[RuntimeSnapshot], None])`。
 - 依赖任务 2～7 的 `DiagnosticsStore/SafeInput/WindowService/DxcamFrameSource/SceneRecognizer/ProgressController/FishingStateMachine`。
 
@@ -1065,8 +1066,8 @@ git commit -m "feat: add explicit fishing state machine"
 ```python
 # try/tests/test_engine.py
 import numpy as np
-from auto_fishing.automation.engine import AutomationEngine
-from auto_fishing.model import FramePacket, ProgressObservation, SceneObservation, FishingState
+from auto_fishing.automation.engine import AutomationCore
+from auto_fishing.model import FramePacket, ProgressObservation, Rect, SceneObservation, FishingState
 
 
 class FakeInput:
@@ -1077,8 +1078,8 @@ class FakeInput:
     def release_all(self): self.events.append("release")
 
 
-def test_engine_drives_single_round_and_counts_success(fake_services):
-    engine, input = fake_services()
+def test_core_drives_single_round_and_counts_success(core_services):
+    core, input = core_services()
     sequence = [
         SceneObservation(), SceneObservation(bite=True),
         SceneObservation(progress=ProgressObservation(.3,.7,.2,1,2)),
@@ -1086,28 +1087,29 @@ def test_engine_drives_single_round_and_counts_success(fake_services):
         SceneObservation(result=True), SceneObservation(result=True),
         SceneObservation(result=True), SceneObservation(result=True), SceneObservation(ready=True),
     ]
-    engine.start_for_test(1)
-    for index, observation in enumerate(sequence): engine.tick_for_test(observation, index + 1)
-    assert engine.snapshot.state == FishingState.COMPLETE
-    assert engine.snapshot.completed == 1
+    core.start(1, 0)
+    client = Rect(0, 0, 1280, 720)
+    for index, observation in enumerate(sequence): core.process(observation, None, index + 1, client)
+    assert core.snapshot.state == FishingState.COMPLETE
+    assert core.snapshot.completed == 1
     assert input.events.count("F") == 2
 
 
-def test_missing_progress_releases_immediately_and_pauses_at_six_frames(fake_services):
-    engine, input = fake_services(initial_state=FishingState.CONTROL)
-    for index in range(6): engine.tick_for_test(SceneObservation(), index / 30)
+def test_missing_progress_releases_immediately_and_pauses_at_six_frames(core_services):
+    core, input = core_services(state=FishingState.CONTROL)
+    for index in range(6): core.process(SceneObservation(), None, index / 30, None)
     assert "release" in input.events
-    assert engine.snapshot.state == FishingState.PAUSED
+    assert core.snapshot.state == FishingState.PAUSED
 
 
-def test_stale_frame_and_foreground_loss_pause(fake_services):
-    engine, input = fake_services(initial_state=FishingState.CONTROL)
-    engine.handle_frame_for_test(FramePacket(np.zeros((10,10,3), np.uint8), 1.0, 30), now=1.6, foreground=True)
-    assert engine.snapshot.state == FishingState.PAUSED
+def test_stale_frame_and_foreground_loss_pause(core_services):
+    core, input = core_services(state=FishingState.CONTROL)
+    core.process(SceneObservation(), FramePacket(np.zeros((10,10,3), np.uint8), 1.0, 30), now=1.6, client_rect=None)
+    assert core.snapshot.state == FishingState.PAUSED
     assert input.events[-1] == "release"
 ```
 
-测试夹具 `fake_services` 在同一文件中创建确定性的假窗口、假截屏、假识别器、假诊断和假时钟，不启动真实线程或发送真实输入。
+测试夹具 `core_services` 在同一文件中创建真实 `FishingStateMachine`、真实 `ProgressController`、确定性的记录输入器和临时诊断目录；仅在操作系统边界使用假对象，不启动真实线程或发送真实输入。夹具需要进入 `CONTROL` 时，通过状态机正式事件依次推进，不直接改写私有字段。
 
 - [ ] **步骤 2：运行测试并确认失败**
 
@@ -1117,7 +1119,7 @@ def test_stale_frame_and_foreground_loss_pause(fake_services):
 
 - [ ] **步骤 3：实现状态驱动的单帧处理**
 
-`AutomationEngine._process(observation, packet, now)` 必须按下表执行，并在每次动作后调用状态机事件：
+`AutomationCore.process(observation, packet, now, client_rect)` 必须按下表执行，并在每次动作后调用状态机事件；`AutomationEngine` 的工作循环也调用这个同一接口：
 
 ```python
 if state is READY: activate_game(); input.tap_f(); scenes.set_bite_baseline(frame); handle(CAST_SENT)
