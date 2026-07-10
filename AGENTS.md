@@ -30,9 +30,9 @@
 - `src/auto_fishing/automation/`：状态机、超时、循环计数、暂停与恢复。
 - `src/auto_fishing/storage/`：本地配置、日志和诊断文件自动清理。
 - `packaging/`：`asInvoker`、`PerMonitorV2` 清单和 PyInstaller 单文件规格；不得启用管理员权限或控制台子系统。
-- `scripts/build.ps1`：从项目 `.venv` 运行完整测试后构建单文件发布物并输出 SHA256。
+- `scripts/build.ps1`：默认从项目 `.venv` 运行完整测试后构建单文件发布物并输出 SHA256；干净环境验收可用 `-PythonPath` 参数或 `AUTO_FISHING_PYTHON` 环境变量指定解释器。
 - `try/`：测试、合成帧、回放输入和临时产物；删除后不得影响正式程序。
-- `try/smoke_exe.ps1`：启动发布物、检查进程响应并关闭的离线烟雾脚本。
+- `try/smoke_exe.ps1`：以启动器 PID 为根递归跟踪所属进程树，检查窗口响应并只关闭本次烟雾拥有的进程；不得按可执行文件路径批量判定或终止进程。
 - `流程截图/`：用户提供的带标注流程参考图，不作为可直接匹配的干净模板。
 - `doc/验收标准.md`：真实使用流程、验证证据和结论。
 - `doc/进展记录/`：按日期记录阶段性修改和异常。
@@ -63,10 +63,17 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m auto_fishing
 .\.venv\Scripts\python.exe -m pytest try/tests -q
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 powershell -ExecutionPolicy Bypass -File try/smoke_exe.ps1
+```
+
+干净虚拟环境验收可将解释器传给构建脚本，例如：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -PythonPath try/output/clean-venv/Scripts/python.exe
 ```
 
 发布物为 `dist/异环自动钓鱼.exe`，`dist/` 保持 Git 忽略。构建脚本必须可重复执行；发布前除自动烟雾外，必须在无开发环境依赖的 Windows 会话中完成启动人工复核。
@@ -76,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File try/smoke_exe.ps1
 - 自动测试必须覆盖坐标缩放、状态超时、A/D 方向与释放、F8、安全暂停、循环计数和诊断清理。
 - 合成动态进度条以 30 帧/秒回放，识别与控制处理不得持续落后于最新帧。
 - 实机必须分别检查窗口、无边框和全屏；无法由自动测试判断的画面识别结果标记为人工确认。
-- 当前离线基线为 186 个 pytest 测试通过、单文件构建成功、启动/响应/关闭烟雾通过；这不替代真实游戏人工验收。
+- 当前离线基线为全新 Python 3.13 虚拟环境安装、可编辑导入、188 个 pytest 测试、单文件构建、启动/响应/所有权隔离/关闭烟雾通过；这不替代真实游戏人工验收。
 - 完成一个阶段后同步更新 `doc/验收标准.md` 中的结果、问题和最终结论。
 
 ## 执行与报告要求

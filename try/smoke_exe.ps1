@@ -4,24 +4,40 @@ $OutputEncoding = [Console]::OutputEncoding
 $Exe = Resolve-Path (Join-Path $PSScriptRoot '..\dist\异环自动钓鱼.exe')
 $ExePath = $Exe.Path
 
-function Get-ExecutableProcesses {
+$Launcher = Start-Process -FilePath $ExePath -PassThru
+$OwnedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+$null = $OwnedProcessIds.Add([int]$Launcher.Id)
+
+function Update-OwnedProcessIds {
+    $Snapshot = @(Get-CimInstance Win32_Process)
+    do {
+        $Changed = $false
+        foreach ($Item in $Snapshot) {
+            if ($OwnedProcessIds.Contains([int]$Item.ParentProcessId)) {
+                if ($OwnedProcessIds.Add([int]$Item.ProcessId)) {
+                    $Changed = $true
+                }
+            }
+        }
+    } while ($Changed)
+}
+
+function Get-OwnedProcesses {
+    Update-OwnedProcessIds
     @(
-        Get-CimInstance Win32_Process |
-            Where-Object { $_.ExecutablePath -eq $ExePath }
+        foreach ($OwnedId in $OwnedProcessIds) {
+            $Process = Get-Process -Id $OwnedId -ErrorAction SilentlyContinue
+            if ($null -ne $Process) {
+                $Process
+            }
+        }
     )
 }
-
-$Existing = Get-ExecutableProcesses
-if ($Existing.Count -ne 0) {
-    throw "烟雾开始前已有发布物进程：$($Existing.ProcessId -join ', ')"
-}
-
-$Launcher = Start-Process -FilePath $ExePath -PassThru
 
 try {
     Start-Sleep -Seconds 3
     $Launcher.Refresh()
-    $Running = Get-ExecutableProcesses
+    $Running = Get-OwnedProcesses
     if ($Running.Count -eq 0) {
         if ($Launcher.HasExited) {
             throw "发布物提前退出，退出码 $($Launcher.ExitCode)"
@@ -31,7 +47,7 @@ try {
 
     $ResponsiveWindows = @(
         foreach ($Item in $Running) {
-            $Process = Get-Process -Id $Item.ProcessId -ErrorAction SilentlyContinue
+            $Process = Get-Process -Id $Item.Id -ErrorAction SilentlyContinue
             if ($null -ne $Process) {
                 $Process.Refresh()
                 if (
@@ -48,10 +64,9 @@ try {
         throw '发布物窗口无响应'
     }
 } finally {
-    $Remaining = Get-ExecutableProcesses
-    foreach ($Item in $Remaining) {
-        $Process = Get-Process -Id $Item.ProcessId -ErrorAction SilentlyContinue
-        if ($null -ne $Process -and $Process.MainWindowHandle -ne 0) {
+    $Remaining = Get-OwnedProcesses
+    foreach ($Process in $Remaining) {
+        if ($Process.MainWindowHandle -ne 0) {
             $null = $Process.CloseMainWindow()
         }
     }
@@ -59,16 +74,16 @@ try {
     $Deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 100
-        $Remaining = Get-ExecutableProcesses
+        $Remaining = Get-OwnedProcesses
     } while ($Remaining.Count -ne 0 -and [DateTime]::UtcNow -lt $Deadline)
 
     if ($Remaining.Count -ne 0) {
-        Stop-Process -Id $Remaining.ProcessId -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $Remaining.Id -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 250
-        $Remaining = Get-ExecutableProcesses
+        $Remaining = Get-OwnedProcesses
     }
     if ($Remaining.Count -ne 0) {
-        throw "发布物仍有残留进程：$($Remaining.ProcessId -join ', ')"
+        throw "发布物仍有残留进程：$($Remaining.Id -join ', ')"
     }
 }
 

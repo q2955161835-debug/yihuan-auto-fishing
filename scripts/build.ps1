@@ -1,11 +1,20 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param(
+    [string]$PythonPath = $env:AUTO_FISHING_PYTHON
+)
+
+$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Console]::OutputEncoding
 $Root = Split-Path -Parent $PSScriptRoot
-$Python = Join-Path $Root '.venv\Scripts\python.exe'
+if ([string]::IsNullOrWhiteSpace($PythonPath)) {
+    $PythonPath = Join-Path $Root '.venv\Scripts\python.exe'
+} elseif (-not [System.IO.Path]::IsPathRooted($PythonPath)) {
+    $PythonPath = Join-Path $Root $PythonPath
+}
+$Python = $PythonPath
 
 if (-not (Test-Path -LiteralPath $Python)) {
-    throw '缺少 .venv，请先建立 Python 3.13 虚拟环境'
+    throw "找不到 Python 解释器：$Python"
 }
 
 Push-Location $Root
