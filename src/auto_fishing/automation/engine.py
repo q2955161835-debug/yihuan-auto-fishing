@@ -48,13 +48,11 @@ class AutomationCore:
         controller: Any,
         input_service: Any,
         scene_recognizer: Any,
-        activate_game: Callable[[], bool],
     ) -> None:
         self.state_machine = state_machine
         self.controller = controller
         self.input_service = input_service
         self.scene_recognizer = scene_recognizer
-        self.activate_game = activate_game
         self.bar_missing_frames = 0
         self.result_candidate_frames = 0
         self.pause_code = ""
@@ -213,7 +211,6 @@ class AutomationCore:
 
         state = self.state_machine.state
         if state is FishingState.READY:
-            self._activate()
             self._input(self.input_service.tap_f)
             if packet is not None:
                 try:
@@ -240,16 +237,6 @@ class AutomationCore:
             self.state_machine.handle(Event.INTERVAL_ELAPSED, now)
 
         return self.snapshot
-
-    def _activate(self) -> None:
-        if self._input_blocked.is_set():
-            return
-        try:
-            activated = self.activate_game()
-        except Exception as error:
-            raise WindowActionError(str(error)) from error
-        if not activated:
-            raise WindowActionError("无法激活已绑定的游戏窗口")
 
     def _input(self, action: Callable[[], None]) -> None:
         with self._lock:
@@ -354,7 +341,6 @@ class AutomationEngine:
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
         self._last_refresh = float("-inf")
-        self.core.activate_game = self._activate_bound
 
     @property
     def is_running(self) -> bool:
@@ -593,15 +579,12 @@ class AutomationEngine:
             return
         try:
             bound = self._require_bound()
-            activated = bool(self.window_service.activate(bound))
-            foreground = activated and bool(
-                self.window_service.is_foreground(bound)
-            )
+            foreground = bool(self.window_service.is_foreground(bound))
         except Exception as error:
-            detail = str(error)
+            detail = f"无法确认游戏窗口前台状态: {error}"
             foreground = False
         else:
-            detail = "无法激活并确认已绑定的游戏窗口"
+            detail = "请在倒计时结束前切回已绑定的游戏窗口"
         if not foreground:
             with self._pause_lock:
                 if (
@@ -1045,9 +1028,6 @@ class AutomationEngine:
         if bound is None:
             raise RuntimeError("游戏窗口未绑定")
         return bound
-
-    def _activate_bound(self) -> bool:
-        return bool(self.window_service.activate(self._require_bound()))
 
     def _refresh_and_validate_window(
         self, bound: Any, now: float

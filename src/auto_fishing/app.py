@@ -17,6 +17,8 @@ BindTick = Callable[[int], None]
 BindDone = Callable[[str | None, str | None], None]
 StartTick = Callable[[int], None]
 StartDone = Callable[[str | None], None]
+ResumeTick = Callable[[int], None]
+ResumeDone = Callable[[str | None], None]
 Scheduler = Callable[[int, Callable[[], None]], Any]
 
 
@@ -44,9 +46,11 @@ class AppController:
         self._command_condition = threading.Condition(threading.RLock())
         self._active_commands = 0
         self._snapshot_queue: SimpleQueue[RuntimeSnapshot] = SimpleQueue()
+        self._ui_callback_queue: SimpleQueue[Callable[[], None]] = SimpleQueue()
         self._snapshot_poll_started = False
         self._pending_complete: tuple[RuntimeSnapshot, int] | None = None
         self._pending_start_done: StartDone | None = None
+        self._pending_resume_done: ResumeDone | None = None
 
     def subscribe(self, callback: Callable[[RuntimeSnapshot], None]) -> None:
         self._callbacks.append(callback)
@@ -68,6 +72,13 @@ class AppController:
         with self._command_condition:
             if self._closed:
                 return
+
+        while True:
+            try:
+                callback = self._ui_callback_queue.get_nowait()
+            except Empty:
+                break
+            callback()
 
         while True:
             try:
@@ -117,12 +128,18 @@ class AppController:
         cancelled = self._cancel_pending_start_countdown()
         if cancelled is not None:
             cancelled("开始倒计时已取消")
+        cancelled_resume = self._cancel_pending_resume_countdown()
+        if cancelled_resume is not None:
+            cancelled_resume("继续倒计时已取消")
         self._start_binding_countdown(on_tick, on_done)
 
     def rebind(self, on_tick: BindTick, on_done: BindDone) -> None:
         cancelled = self._cancel_pending_start_countdown()
         if cancelled is not None:
             cancelled("开始倒计时已取消")
+        cancelled_resume = self._cancel_pending_resume_countdown()
+        if cancelled_resume is not None:
+            cancelled_resume("继续倒计时已取消")
         with self._command_condition:
             paused = self._state is FishingState.PAUSED
             if self._starting or (self.engine.is_running and not paused):
@@ -206,6 +223,45 @@ class AppController:
             self._countdown_generation += 1
             return cancelled
 
+    def _cancel_pending_resume_countdown(self) -> ResumeDone | None:
+        with self._command_condition:
+            if self._pending_resume_done is None:
+                return None
+            cancelled = self._pending_resume_done
+            self._pending_resume_done = None
+            self._countdown_active = False
+            self._countdown_generation += 1
+            return cancelled
+
+    def _cancel_pending_countdowns_for_pause(
+        self,
+    ) -> list[tuple[StartDone | ResumeDone, str]]:
+        cancelled: list[tuple[StartDone | ResumeDone, str]] = []
+        with self._command_condition:
+            if self._pending_start_done is not None:
+                cancelled.append(
+                    (self._pending_start_done, "开始倒计时已被紧急暂停取消")
+                )
+                self._pending_start_done = None
+            if self._pending_resume_done is not None:
+                cancelled.append(
+                    (self._pending_resume_done, "继续倒计时已被紧急暂停取消")
+                )
+                self._pending_resume_done = None
+            if cancelled:
+                self._countdown_active = False
+                self._countdown_generation += 1
+        return cancelled
+
+    def _defer_ui_callbacks(
+        self,
+        callbacks: list[tuple[StartDone | ResumeDone, str]],
+    ) -> None:
+        for callback, message in callbacks:
+            self._ui_callback_queue.put(
+                lambda done=callback, error=message: done(error)
+            )
+
     def start_after_countdown(
         self,
         target: int,
@@ -259,6 +315,52 @@ class AppController:
                 self._pending_start_done = None
             raise
 
+    def resume_after_countdown(
+        self,
+        on_tick: ResumeTick,
+        on_done: ResumeDone,
+    ) -> None:
+        with self._command_condition:
+            if self._closed:
+                return
+            if self._countdown_active:
+                on_done("倒计时正在进行")
+                return
+            self._countdown_active = True
+            self._countdown_generation += 1
+            generation = self._countdown_generation
+            self._pending_resume_done = on_done
+
+        def advance(seconds: int) -> None:
+            with self._command_condition:
+                if self._closed or generation != self._countdown_generation:
+                    return
+                if seconds > 0:
+                    on_tick(seconds)
+                    self.schedule(1000, lambda: advance(seconds - 1))
+                    return
+                self._countdown_active = False
+                self._pending_resume_done = None
+                self._active_commands += 1
+
+            error_message: str | None = None
+            try:
+                self.engine.resume()
+            except Exception as error:
+                error_message = str(error)
+            finally:
+                self._finish_command()
+            on_done(error_message)
+
+        try:
+            advance(3)
+        except BaseException:
+            with self._command_condition:
+                self._countdown_active = False
+                self._countdown_generation += 1
+                self._pending_resume_done = None
+            raise
+
     def start(self, target: int) -> None:
         with self._command_condition:
             if self._closed:
@@ -273,6 +375,8 @@ class AppController:
             self._finish_command()
 
     def pause(self, reason: str = "按钮暂停") -> None:
+        cancelled = self._cancel_pending_countdowns_for_pause()
+        self._defer_ui_callbacks(cancelled)
         with self._command_condition:
             if self._closed:
                 return
@@ -317,6 +421,7 @@ class AppController:
             self._countdown_active = False
             self._countdown_generation += 1
             self._pending_start_done = None
+            self._pending_resume_done = None
             self._snapshot_generation += 1
             self._pending_complete = None
             while self._active_commands:
@@ -423,7 +528,6 @@ class Application:
             controller=ProgressController(),
             input_service=safe_input,
             scene_recognizer=scene_recognizer,
-            activate_game=lambda: False,
         )
         diagnostics = DiagnosticsStore(data_dir / "diagnostics")
         engine = AutomationEngine(

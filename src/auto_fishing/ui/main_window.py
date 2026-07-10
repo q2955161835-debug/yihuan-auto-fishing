@@ -181,6 +181,7 @@ class MainWindow:
 
     def _on_start_tick(self, seconds: int) -> None:
         self.state_var.set(f"开始倒计时：{seconds}")
+        self.error_var.set("请在倒计时结束前切回已绑定的游戏窗口")
 
     def _on_start_done(self, error: str | None) -> None:
         self._countdown_active = False
@@ -194,11 +195,30 @@ class MainWindow:
     def on_pause_or_resume(self) -> None:
         try:
             if self._state is FishingState.PAUSED:
-                self.controller.resume()
+                self._countdown_active = True
+                self.error_var.set("无")
+                self._refresh_control_states()
+                self.controller.resume_after_countdown(
+                    self._on_resume_tick,
+                    self._on_resume_done,
+                )
             else:
                 self.controller.pause()
         except Exception as error:
-            self.error_var.set(str(error))
+            if self._state is FishingState.PAUSED:
+                self._on_resume_done(str(error))
+            else:
+                self.error_var.set(str(error))
+
+    def _on_resume_tick(self, seconds: int) -> None:
+        self.state_var.set(f"继续倒计时：{seconds}")
+        self.error_var.set("请在倒计时结束前切回已绑定的游戏窗口")
+
+    def _on_resume_done(self, error: str | None) -> None:
+        self._countdown_active = False
+        self.state_var.set(self._state.value)
+        self.error_var.set(error or "无")
+        self._refresh_control_states()
 
     def block_start(self, reason: str) -> None:
         self._start_block_reason = reason
@@ -264,7 +284,11 @@ class MainWindow:
             )
         )
         self.pause_button.configure(
-            state="normal" if self._runtime_active else "disabled"
+            state=(
+                "normal"
+                if self._runtime_active and not self._countdown_active
+                else "disabled"
+            )
         )
 
     def _target_count(self) -> int | None:

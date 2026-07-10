@@ -548,7 +548,6 @@ def make_core(
         controller=ProgressController(),
         input_service=input_service,
         scene_recognizer=SceneRecognizer(),
-        activate_game=lambda: True,
     )
     if state is not FishingState.UNBOUND:
         core.start(1, 0.0)
@@ -583,7 +582,6 @@ def make_engine(
         controller=ProgressController(),
         input_service=input_service,
         scene_recognizer=recognizer,
-        activate_game=lambda: window_service.activate(BOUND),
     )
     engine = AutomationEngine(
         core=core,
@@ -806,7 +804,6 @@ def test_complete_pause_records_release_failure_without_losing_terminal_state(
         controller=ProgressController(),
         input_service=input_service,
         scene_recognizer=SceneRecognizer(),
-        activate_game=lambda: True,
     )
     core.start(1, 0.0)
     for index, observation in enumerate(single_round_observations(), 1):
@@ -879,7 +876,6 @@ def test_pause_serializes_with_inflight_process_and_finishes_with_release() -> N
         controller=ProgressController(),
         input_service=input_service,
         scene_recognizer=SceneRecognizer(),
-        activate_game=lambda: True,
     )
     core.start(1, 0.0)
     process_errors: list[BaseException] = []
@@ -1074,7 +1070,6 @@ def test_core_timeout_release_failure_still_pauses_as_input_error() -> None:
         controller=ProgressController(),
         input_service=input_service,
         scene_recognizer=SceneRecognizer(),
-        activate_game=lambda: True,
     )
     core.start(1, 0.0)
 
@@ -1194,7 +1189,7 @@ def test_engine_start_checks_foreground_without_forcing_activation(
     try:
         wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
 
-        assert window_service.activate_calls == 1
+        assert window_service.activate_calls == 0
     finally:
         engine.shutdown()
 
@@ -1219,7 +1214,7 @@ def test_engine_start_rejects_background_game_without_worker(tmp_path) -> None:
     assert core.snapshot.state is FishingState.UNBOUND
 
 
-def test_resume_activates_game_and_keeps_request_until_third_stable_frame(
+def test_resume_after_manual_foreground_keeps_request_until_third_stable_frame(
     tmp_path,
 ) -> None:
     events: list[str] = []
@@ -1239,11 +1234,15 @@ def test_resume_activates_game_and_keeps_request_until_third_stable_frame(
     window_service.foreground = False
     recognizer.resume_mode = True
 
+    # The UI countdown gives the player time to restore game focus.
+    window_service.foreground = True
+
     engine.resume()
     wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
 
     try:
-        assert events[:3] == ["ui-continue", "activate", "foreground"]
+        assert events[:2] == ["ui-continue", "foreground"]
+        assert "activate" not in events
         assert [event for event in events if event.startswith("frame-")][:3] == [
             "frame-1",
             "frame-2",
@@ -1358,7 +1357,7 @@ def test_late_stale_frame_release_error_cannot_clear_resume_token(tmp_path) -> N
         engine.shutdown()
 
 
-def test_resume_activation_failure_stays_paused_with_window_error(tmp_path) -> None:
+def test_resume_requires_manual_foreground_without_activation(tmp_path) -> None:
     window_service = RecordingWindowService()
     engine, core, _input, _window, _source = make_engine(
         tmp_path,
@@ -1375,8 +1374,9 @@ def test_resume_activation_failure_stays_paused_with_window_error(tmp_path) -> N
     try:
         assert core.snapshot.state is FishingState.PAUSED
         assert core.pause_code == "E_WINDOW"
+        assert core.snapshot.error == "请在倒计时结束前切回已绑定的游戏窗口"
         assert engine._resume_request is None
-        assert window_service.activate_calls == activate_calls_before_resume + 1
+        assert window_service.activate_calls == activate_calls_before_resume
     finally:
         engine.shutdown()
 

@@ -18,6 +18,7 @@ class FakeController:
         self.bind_callbacks = None
         self.rebind_callbacks = None
         self.start_callbacks = None
+        self.resume_callbacks = None
 
     def bind_after_countdown(self, on_tick, on_done) -> None:
         self.calls.append("bind")
@@ -39,6 +40,10 @@ class FakeController:
 
     def resume(self) -> None:
         self.calls.append("resume")
+
+    def resume_after_countdown(self, on_tick, on_done) -> None:
+        self.calls.append("resume_after_countdown")
+        self.resume_callbacks = (on_tick, on_done)
 
     def cancel_current(self) -> None:
         self.calls.append("cancel_current")
@@ -106,6 +111,7 @@ def test_window_is_topmost_and_validates_count(root) -> None:
     for seconds in (3, 2, 1):
         on_tick(seconds)
         assert window.state_var.get() == f"开始倒计时：{seconds}"
+        assert window.error_var.get() == "请在倒计时结束前切回已绑定的游戏窗口"
         assert window.start_button.instate(["disabled"])
         assert window.count_spinbox.instate(["disabled"])
     on_done("请在倒计时结束前切回已绑定的游戏窗口")
@@ -200,7 +206,14 @@ def test_snapshot_is_queued_on_tk_thread_and_locks_runtime_controls(root) -> Non
         assert window.pause_button.cget("text") == "继续"
 
         window.on_pause_or_resume()
-        assert controller.calls[-1] == "resume"
+        assert controller.calls[-1] == "resume_after_countdown"
+        assert controller.resume_callbacks is not None
+        on_tick, on_done = controller.resume_callbacks
+        on_tick(3)
+        assert window.state_var.get() == "继续倒计时：3"
+        assert window.error_var.get() == "请在倒计时结束前切回已绑定的游戏窗口"
+        assert window.pause_button.instate(["disabled"])
+        on_done(None)
         window.apply_snapshot(
             RuntimeSnapshot(FishingState.READY, 0, 7, 30.0)
         )
@@ -464,6 +477,101 @@ def test_controller_counts_down_before_starting_engine() -> None:
 
     assert engine.calls == [("start", 4)]
     assert completed == [None]
+
+
+def test_controller_counts_down_before_resuming_engine() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    ticks: list[int] = []
+    completed: list[str | None] = []
+
+    controller.resume_after_countdown(ticks.append, completed.append)
+
+    assert ticks == [3]
+    assert "resume" not in engine.calls
+    for _ in range(2):
+        scheduler.run_next(1000)
+    assert ticks == [3, 2, 1]
+    assert "resume" not in engine.calls
+    scheduler.run_next(1000)
+
+    assert engine.calls == ["resume"]
+    assert completed == [None]
+
+
+def test_f8_cancels_pending_resume_countdown_before_engine_call() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    engine.publish(RuntimeSnapshot(FishingState.PAUSED, 0, 2, 30.0))
+    scheduler.run_next(10)
+    completed: list[str | None] = []
+
+    controller.resume_after_countdown(
+        lambda _seconds: None,
+        completed.append,
+    )
+    controller.pause("F8 紧急暂停")
+
+    scheduler.run_next(10)
+    assert completed == ["继续倒计时已被紧急暂停取消"]
+    scheduler.run_next(1000)
+
+    assert "resume" not in engine.calls
+    assert engine.calls[-1] == ("pause", "F8 紧急暂停")
+
+
+def test_f8_cancels_pending_start_countdown_before_engine_call() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+    scheduler.run_next(10)
+    completed: list[str | None] = []
+
+    controller.start_after_countdown(
+        2,
+        lambda _seconds: None,
+        completed.append,
+    )
+    controller.pause("F8 紧急暂停")
+
+    scheduler.run_next(10)
+    assert completed == ["开始倒计时已被紧急暂停取消"]
+    scheduler.run_next(1000)
+
+    assert not any(call == ("start", 2) for call in engine.calls)
+    assert engine.calls[-1] == ("pause", "F8 紧急暂停")
+
+
+def test_f8_delivers_countdown_cancellation_on_main_thread() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    engine.publish(RuntimeSnapshot(FishingState.PAUSED, 0, 2, 30.0))
+    scheduler.run_next(10)
+    completed: list[tuple[str | None, int]] = []
+    main_thread = threading.get_ident()
+
+    controller.resume_after_countdown(
+        lambda _seconds: None,
+        lambda error: completed.append((error, threading.get_ident())),
+    )
+    pause_thread = threading.Thread(
+        target=lambda: controller.pause("F8 紧急暂停")
+    )
+    pause_thread.start()
+    pause_thread.join(1.0)
+
+    assert not pause_thread.is_alive()
+    assert completed == []
+    scheduler.run_next(10)
+
+    assert completed == [("继续倒计时已被紧急暂停取消", main_thread)]
 
 
 def test_shutdown_cancels_pending_start_countdown() -> None:
