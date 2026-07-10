@@ -1254,6 +1254,89 @@ def test_start_thread_construction_failure_rolls_back_ready_core(
     assert engine.is_running is False
 
 
+def test_worker_start_failure_releases_both_startup_gates(
+    tmp_path, monkeypatch
+) -> None:
+    original_thread = threading.Thread
+    gates: dict[str, threading.Event] = {}
+    engine, core, input_service, _window, source = make_engine(tmp_path)
+
+    class FailingStartThread(original_thread):
+        def start(self) -> None:
+            raise RuntimeError("worker start failed")
+
+    def thread_factory(*args, **kwargs):
+        if kwargs.get("name") == "auto-fishing-worker":
+            publish_done, start_decided = kwargs["args"]
+            gates["publish_done"] = publish_done
+            gates["start_decided"] = start_decided
+            return FailingStartThread(*args, **kwargs)
+        return original_thread(*args, **kwargs)
+
+    monkeypatch.setattr(threading, "Thread", thread_factory)
+
+    with pytest.raises(RuntimeError, match="worker start failed"):
+        engine.start(1)
+
+    assert gates["publish_done"].is_set()
+    assert gates["start_decided"].is_set()
+    assert engine._start_allowed is False
+    assert engine._thread is None
+    assert engine.is_running is False
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.input_blocked is True
+    assert input_service.events[-1] == "release"
+    assert source.started == []
+
+
+def test_initial_publish_failure_releases_gates_and_rolls_back_worker(
+    tmp_path, monkeypatch
+) -> None:
+    original_thread = threading.Thread
+    gates: dict[str, threading.Event] = {}
+    engine, core, input_service, _window, source = make_engine(tmp_path)
+    original_publish = engine._publish
+    publish_calls = 0
+
+    def thread_factory(*args, **kwargs):
+        if kwargs.get("name") == "auto-fishing-worker":
+            publish_done, start_decided = kwargs["args"]
+            gates["publish_done"] = publish_done
+            gates["start_decided"] = start_decided
+        return original_thread(*args, **kwargs)
+
+    def failing_initial_publish() -> None:
+        nonlocal publish_calls
+        publish_calls += 1
+        if publish_calls == 1:
+            raise RuntimeError("initial publish failed")
+        original_publish()
+
+    monkeypatch.setattr(threading, "Thread", thread_factory)
+    monkeypatch.setattr(engine, "_publish", failing_initial_publish)
+
+    with pytest.raises(RuntimeError, match="initial publish failed"):
+        engine.start(1)
+
+    worker = engine._thread
+    try:
+        assert gates["publish_done"].is_set()
+        assert gates["start_decided"].is_set()
+        assert engine._start_allowed is False
+        assert engine._thread is None
+        assert engine.is_running is False
+        assert core.snapshot.state is FishingState.PAUSED
+        assert core.input_blocked is True
+        assert input_service.events[-1] == "release"
+        assert source.started == []
+    finally:
+        engine._start_allowed = False
+        engine._start_decided.set()
+        if worker is not None:
+            worker.join(timeout=1)
+        engine.shutdown()
+
+
 def test_pause_during_pending_start_cancels_worker_with_latest_reason(
     tmp_path,
 ) -> None:

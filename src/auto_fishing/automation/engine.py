@@ -386,6 +386,7 @@ class AutomationEngine:
                 with self._pause_lock:
                     self._start_allowed = False
                     start_decided.set()
+            publish_done.set()
             if core_started:
                 self._pause(
                     "E_AUTOMATION",
@@ -408,6 +409,7 @@ class AutomationEngine:
                 with self._pause_lock:
                     self._start_allowed = False
                     start_decided.set()
+            publish_done.set()
             raise RuntimeError("startup cancelled by pause or shutdown")
 
         try:
@@ -425,6 +427,7 @@ class AutomationEngine:
                 with self._pause_lock:
                     self._start_allowed = False
                     start_decided.set()
+            publish_done.set()
             self._pause(
                 "E_AUTOMATION",
                 f"无法准备自动化工作线程: {error}",
@@ -451,6 +454,7 @@ class AutomationEngine:
             with self._pause_lock:
                 self._start_allowed = False
                 start_decided.set()
+            publish_done.set()
             raise RuntimeError("startup cancelled by pause or shutdown")
         start_resolved.set()
 
@@ -472,12 +476,15 @@ class AutomationEngine:
         try:
             worker.start()
         except BaseException as error:
+            with self._pause_lock:
+                self._start_allowed = False
+                start_decided.set()
+            publish_done.set()
             with self._lifecycle_lock:
                 if self._thread is worker:
                     self._thread = None
                 self._starting = False
                 thread_start_done.set()
-            publish_done.set()
             self._pause(
                 "E_AUTOMATION",
                 f"无法启动自动化工作线程: {error}",
@@ -492,7 +499,23 @@ class AutomationEngine:
 
         try:
             self._publish()
-        finally:
+        except BaseException as error:
+            with self._pause_lock:
+                self._start_allowed = False
+                start_decided.set()
+            publish_done.set()
+            worker.join()
+            with self._lifecycle_lock:
+                if self._thread is worker:
+                    self._thread = None
+            self._pause(
+                "E_AUTOMATION",
+                f"无法发布初始自动化状态: {error}",
+                None,
+                save_diagnostic=False,
+            )
+            raise
+        else:
             publish_done.set()
 
         with self._pause_lock:
