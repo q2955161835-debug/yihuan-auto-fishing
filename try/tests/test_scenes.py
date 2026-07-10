@@ -138,10 +138,15 @@ def test_result_requires_three_consecutive_frames() -> None:
     recognizer = SceneRecognizer()
     frame = result_frame()
 
-    assert recognizer.observe(frame, 1.0).result is False
-    assert recognizer.observe(frame, 1.1).result is False
+    first = recognizer.observe(frame, 1.0)
+    second = recognizer.observe(frame, 1.1)
     observation = recognizer.observe(frame, 1.2)
 
+    assert first.result_candidate is True
+    assert first.result is False
+    assert second.result_candidate is True
+    assert second.result is False
+    assert observation.result_candidate is True
     assert observation.result is True
     assert observation.progress is None
 

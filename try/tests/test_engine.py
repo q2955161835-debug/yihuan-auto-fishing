@@ -125,6 +125,25 @@ class RecordingWindowService:
         return self.refreshed
 
 
+class ActivatingWindowService(RecordingWindowService):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+        self.foreground = False
+        self.activate_succeeds = True
+
+    def activate(self, _bound: BoundWindow) -> bool:
+        self.activate_calls += 1
+        self.events.append("activate")
+        if self.activate_succeeds:
+            self.foreground = True
+        return self.activate_succeeds
+
+    def is_foreground(self, _bound: BoundWindow) -> bool:
+        self.events.append("foreground")
+        return self.foreground
+
+
 class FreshFrameSource:
     def __init__(self, frame: np.ndarray | None = None) -> None:
         self.frame = (
@@ -269,6 +288,23 @@ class ScriptedRecognizer:
         return SceneObservation()
 
 
+class OrderedResumeRecognizer(ScriptedRecognizer):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+        self.resume_frames = 0
+        self.resume_mode = False
+
+    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+        if not self.resume_mode:
+            return super().observe(frame, timestamp)
+        self.resume_frames += 1
+        self.events.append(f"frame-{self.resume_frames}")
+        if self.resume_frames < 3:
+            return SceneObservation()
+        return SceneObservation(ready=True)
+
+
 class BarrierRecognizer(ScriptedRecognizer):
     def __init__(self, observations: list[SceneObservation]) -> None:
         super().__init__(observations)
@@ -380,8 +416,8 @@ def single_round_observations() -> list[SceneObservation]:
         SceneObservation(bite=True),
         SceneObservation(progress=progress),
         SceneObservation(progress=progress),
-        SceneObservation(result=True),
-        SceneObservation(result=True),
+        SceneObservation(result_candidate=True),
+        SceneObservation(result_candidate=True),
         SceneObservation(result=True),
         SceneObservation(result=True),
         SceneObservation(ready=True),
@@ -464,8 +500,8 @@ def test_core_drives_single_round_and_counts_only_after_ready() -> None:
         SceneObservation(bite=True),
         SceneObservation(progress=progress),
         SceneObservation(progress=progress),
-        SceneObservation(result=True),
-        SceneObservation(result=True),
+        SceneObservation(result_candidate=True),
+        SceneObservation(result_candidate=True),
         SceneObservation(result=True),
         SceneObservation(result=True),
     ]
@@ -491,15 +527,16 @@ def test_core_releases_on_first_missing_bar_and_pauses_at_six_frames() -> None:
 
     assert input_service.events[0] == "release"
     assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_PROGRESS_LOST"
     assert "连续六帧" in core.snapshot.error
 
 
 def test_core_requires_two_result_candidates_before_leaving_control() -> None:
     core, input_service, _state_machine = make_core(state=FishingState.CONTROL)
 
-    core.process(SceneObservation(result=True), None, 0.1, CLIENT)
+    core.process(SceneObservation(result_candidate=True), None, 0.1, CLIENT)
     assert core.snapshot.state is FishingState.CONTROL
-    core.process(SceneObservation(result=True), None, 0.2, CLIENT)
+    core.process(SceneObservation(result_candidate=True), None, 0.2, CLIENT)
     assert core.snapshot.state is FishingState.WAIT_RESULT
     core.process(SceneObservation(), None, 0.3, CLIENT)
 
@@ -988,6 +1025,96 @@ def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> No
     assert core.snapshot.state is FishingState.DISMISS_RESULT
     assert not any(isinstance(event, tuple) for event in input_service.events)
     engine.shutdown()
+
+
+def test_resume_activates_game_and_keeps_request_until_third_stable_frame(
+    tmp_path,
+) -> None:
+    events: list[str] = []
+    window_service = ActivatingWindowService(events)
+    window_service.foreground = True
+    recognizer = OrderedResumeRecognizer(events)
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+        window_service=window_service,
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.pause("用户暂停")
+    events.clear()
+    events.append("ui-continue")
+    window_service.foreground = False
+    recognizer.resume_mode = True
+
+    engine.resume()
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+
+    try:
+        assert events[:3] == ["ui-continue", "activate", "foreground"]
+        assert [event for event in events if event.startswith("frame-")][:3] == [
+            "frame-1",
+            "frame-2",
+            "frame-3",
+        ]
+        assert recognizer.resume_frames >= 3
+        assert engine._resume_request is None
+        assert input_service.events.count("F") == 2
+    finally:
+        engine.shutdown()
+
+
+def test_resume_activation_failure_stays_paused_with_window_error(tmp_path) -> None:
+    window_service = RecordingWindowService()
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    activate_calls_before_resume = window_service.activate_calls
+    engine.pause("用户暂停")
+    window_service.foreground = False
+
+    engine.resume()
+
+    try:
+        assert core.snapshot.state is FishingState.PAUSED
+        assert core.pause_code == "E_WINDOW"
+        assert engine._resume_request is None
+        assert window_service.activate_calls == activate_calls_before_resume + 1
+    finally:
+        engine.shutdown()
+
+
+def test_window_invalid_pause_can_cancel_rebind_and_start_again(tmp_path) -> None:
+    window_service = RecordingWindowService()
+    engine, core, input_service, _window, source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    window_service.foreground = False
+    wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+
+    engine.cancel_current()
+
+    assert core.snapshot.state is FishingState.UNBOUND
+    assert engine.is_running is False
+    assert engine._thread is None
+    assert source.stop_calls >= 1
+    assert input_service.events[-1] == "release"
+
+    window_service.foreground = True
+    new_bound = BoundWindow(200, "异环-新窗口", CLIENT, MONITOR, 0, 0)
+    engine.bind(new_bound)
+    engine.start(1)
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+        assert source.started == [(0, 0), (0, 0)]
+    finally:
+        engine.shutdown()
 
 
 def test_resume_does_not_consume_observation_captured_before_request(tmp_path) -> None:

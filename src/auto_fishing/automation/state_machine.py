@@ -65,6 +65,15 @@ class FishingStateMachine:
         self.paused_from = None
         self.result_clicked = False
 
+    def cancel_current(self, now: float) -> None:
+        self.state = FishingState.UNBOUND
+        self.target = 0
+        self.completed = 0
+        self.entered_at = now
+        self.pause_reason = ""
+        self.paused_from = None
+        self.result_clicked = False
+
     def handle(self, event: Event, now: float) -> None:
         if (
             self.state is FishingState.DISMISS_RESULT

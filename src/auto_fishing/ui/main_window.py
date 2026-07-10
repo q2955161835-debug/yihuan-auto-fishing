@@ -123,10 +123,13 @@ class MainWindow:
         self._begin_binding(self.controller.bind_after_countdown)
 
     def on_rebind(self) -> None:
-        self._begin_binding(self.controller.rebind)
+        self._begin_binding(self.controller.rebind, allow_paused=True)
 
-    def _begin_binding(self, action: Any) -> None:
-        if self._countdown_active or self._runtime_active:
+    def _begin_binding(self, action: Any, *, allow_paused: bool = False) -> None:
+        if self._countdown_active or (
+            self._runtime_active
+            and not (allow_paused and self._state is FishingState.PAUSED)
+        ):
             return
         self._countdown_active = True
         self._refresh_control_states()
@@ -183,6 +186,9 @@ class MainWindow:
         self.error_var.set(reason)
         self._refresh_control_states()
 
+    def show_warning(self, reason: str) -> None:
+        self.error_var.set(reason)
+
     def _queue_snapshot(self, snapshot: RuntimeSnapshot) -> None:
         if self._closed:
             return
@@ -217,9 +223,15 @@ class MainWindow:
         self.count_spinbox.configure(
             state="disabled" if self._runtime_active else "normal"
         )
-        binding_state = "disabled" if lock_binding else "normal"
-        self.bind_button.configure(state=binding_state)
-        self.rebind_button.configure(state=binding_state)
+        self.bind_button.configure(
+            state="disabled" if lock_binding else "normal"
+        )
+        rebind_locked = self._countdown_active or (
+            self._runtime_active and self._state is not FishingState.PAUSED
+        )
+        self.rebind_button.configure(
+            state="disabled" if rebind_locked else "normal"
+        )
         self.start_button.configure(
             state=(
                 "disabled"

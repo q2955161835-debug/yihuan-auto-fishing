@@ -84,7 +84,13 @@ class SceneRecognizer:
         result = self.result_consecutive >= 3
         ready = self.ready_consecutive >= 3 and not result
 
-        return SceneObservation(bite=bite, result=result, ready=ready, progress=progress)
+        return SceneObservation(
+            bite=bite,
+            result=result,
+            result_candidate=result_candidate,
+            ready=ready,
+            progress=progress,
+        )
 
 
 def _blue_ratio(image: np.ndarray) -> float:

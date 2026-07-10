@@ -114,6 +114,22 @@ class AppController:
         self._start_binding_countdown(on_tick, on_done)
 
     def rebind(self, on_tick: BindTick, on_done: BindDone) -> None:
+        with self._command_condition:
+            paused = self._state is FishingState.PAUSED
+        if paused:
+            if not self._begin_command():
+                return
+            try:
+                self.engine.cancel_current()
+            except Exception as error:
+                with self._command_condition:
+                    title = self._last_bound_title
+                on_done(title, str(error))
+                return
+            finally:
+                self._finish_command()
+            with self._command_condition:
+                self._last_bound_title = None
         self._start_binding_countdown(on_tick, on_done)
 
     def _start_binding_countdown(
@@ -272,7 +288,10 @@ class Application:
             services.window_service.enable_dpi_awareness()
             root = self._root_factory()
             services.diagnostics.cleanup()
-            services.window_service.own_hwnd = root.winfo_id()
+            control_hwnd = services.window_service.resolve_top_level(
+                root.winfo_id()
+            )
+            services.window_service.own_hwnd = control_hwnd
             controller = AppController(
                 services.engine,
                 services.window_service,
@@ -284,7 +303,10 @@ class Application:
                 services.settings,
             )
             root.update_idletasks()
-            services.window_service.exclude_from_capture(root.winfo_id())
+            if not services.window_service.exclude_from_capture(control_hwnd):
+                main_window.show_warning(
+                    "控制窗口无法从截图中排除，请勿遮挡游戏识别区域"
+                )
             if not services.hotkey.start(
                 lambda: controller.pause("F8 紧急暂停")
             ):
@@ -341,7 +363,7 @@ class Application:
             safe_input=safe_input,
             engine=engine,
             diagnostics=diagnostics,
-            settings=SettingsStore(data_dir / "settings.json"),
+            settings=SettingsStore(data_dir / "config.json"),
         )
 
     @staticmethod

@@ -25,6 +25,14 @@ def test_settings_non_object_json_returns_defaults(tmp_path, root_value):
     assert SettingsStore(path).load() == AppSettings()
 
 
+@pytest.mark.parametrize("token", ["1e10000", "NaN", "Infinity"])
+def test_settings_rejects_overflowing_or_non_finite_numbers(tmp_path, token):
+    path = tmp_path / "config.json"
+    path.write_text(f'{{"target_count": {token}}}', "utf-8")
+
+    assert SettingsStore(path).load() == AppSettings()
+
+
 def test_diagnostics_delete_old_and_keep_twenty_groups(tmp_path):
     store = DiagnosticsStore(tmp_path / "diagnostics")
     now = datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc)

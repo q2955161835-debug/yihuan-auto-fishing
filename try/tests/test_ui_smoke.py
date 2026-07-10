@@ -35,6 +35,9 @@ class FakeController:
     def resume(self) -> None:
         self.calls.append("resume")
 
+    def cancel_current(self) -> None:
+        self.calls.append("cancel_current")
+
     def shutdown(self) -> None:
         self.calls.append("shutdown")
 
@@ -160,7 +163,7 @@ def test_snapshot_is_queued_on_tk_thread_and_locks_runtime_controls(root) -> Non
         assert window.error_var.get() == "窗口失去前台"
         assert window.count_spinbox.instate(["disabled"])
         assert window.bind_button.instate(["disabled"])
-        assert window.rebind_button.instate(["disabled"])
+        assert not window.rebind_button.instate(["disabled"])
         assert window.pause_button.cget("text") == "继续"
 
         window.on_pause_or_resume()
@@ -172,6 +175,24 @@ def test_snapshot_is_queued_on_tk_thread_and_locks_runtime_controls(root) -> Non
         assert controller.calls[-1] == "pause"
     finally:
         root.after = original_after  # type: ignore[method-assign]
+
+
+def test_paused_window_rebind_cancels_current_round_before_countdown(root) -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    window = MainWindow(root, controller, FakeSettings())
+    engine.publish(
+        RuntimeSnapshot(FishingState.PAUSED, 0, 2, 0.0, "窗口已失效")
+    )
+    window.apply_snapshot(
+        RuntimeSnapshot(FishingState.PAUSED, 0, 2, 0.0, "窗口已失效")
+    )
+
+    window.on_rebind()
+
+    assert "cancel_current" in engine.calls
+    assert window.binding_var.get() == "绑定倒计时：3"
 
 
 def test_start_can_be_blocked_when_f8_registration_fails(root) -> None:
@@ -250,6 +271,9 @@ class BridgeEngine:
 
     def resume(self) -> None:
         self.calls.append("resume")
+
+    def cancel_current(self) -> None:
+        self.calls.append("cancel_current")
 
     def shutdown(self) -> None:
         self.calls.append("shutdown")
@@ -723,6 +747,10 @@ class AppWindowService:
     def enable_dpi_awareness(self) -> None:
         self.events.append("dpi")
 
+    def resolve_top_level(self, hwnd: int) -> int:
+        self.events.append(("resolve_top_level", hwnd))
+        return 900
+
     def exclude_from_capture(self, hwnd: int) -> bool:
         self.events.append(("exclude", hwnd))
         return True
@@ -802,6 +830,9 @@ class AppMainWindow:
     def block_start(self, reason: str) -> None:
         self.events.append(("block_start", reason))
 
+    def show_warning(self, reason: str) -> None:
+        self.events.append(("warning", reason))
+
 
 def test_application_wires_f8_and_always_cleans_up_resources() -> None:
     events: list[object] = []
@@ -824,15 +855,16 @@ def test_application_wires_f8_and_always_cleans_up_resources() -> None:
         ),
     ).run()
 
-    assert services.window_service.own_hwnd == 123
+    assert services.window_service.own_hwnd == 900
     assert ("pause", "F8 紧急暂停") not in engine.calls
     assert ("block_start", "F8 注册失败，请关闭占用 F8 的程序") in events
     assert events == [
         "dpi",
         "diagnostics.cleanup",
+        ("resolve_top_level", 123),
         "window",
         "update",
-        ("exclude", 123),
+        ("exclude", 900),
         "hotkey.start",
         ("block_start", "F8 注册失败，请关闭占用 F8 的程序"),
         "mainloop",
@@ -841,6 +873,41 @@ def test_application_wires_f8_and_always_cleans_up_resources() -> None:
         "input.release_all",
         "root.destroy",
     ]
+
+
+def test_application_reports_capture_exclusion_failure_without_blocking_start() -> None:
+    events: list[object] = []
+    root = AppRoot(events)
+    engine = BridgeEngine(events)
+    window_service = AppWindowService(events)
+
+    def fail_exclusion(hwnd: int) -> bool:
+        events.append(("exclude", hwnd))
+        return False
+
+    window_service.exclude_from_capture = fail_exclusion  # type: ignore[method-assign]
+    services = ApplicationServices(
+        window_service=window_service,
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=AppSafeInput(events),
+        engine=engine,
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+    )
+
+    Application(
+        services=services,
+        root_factory=lambda: root,
+        main_window_factory=lambda root, controller, settings: AppMainWindow(
+            root, controller, settings, events
+        ),
+    ).run()
+
+    assert ("warning", "控制窗口无法从截图中排除，请勿遮挡游戏识别区域") in events
+    assert not any(
+        isinstance(event, tuple) and event[0] == "block_start"
+        for event in events
+    )
 
 
 def test_application_routes_a_registered_f8_press_through_controller() -> None:
@@ -912,3 +979,9 @@ print("APP_IMPORT_SAFE")
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "APP_IMPORT_SAFE"
+
+
+def test_application_builds_settings_store_at_specified_config_path(tmp_path) -> None:
+    services = Application._build_services(tmp_path)
+
+    assert services.settings.path == tmp_path / "config.json"

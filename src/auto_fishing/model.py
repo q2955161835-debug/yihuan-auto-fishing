@@ -74,6 +74,7 @@ class ProgressObservation:
 class SceneObservation:
     bite: bool = False
     result: bool = False
+    result_candidate: bool = False
     ready: bool = False
     progress: ProgressObservation | None = None
 

@@ -154,6 +154,20 @@ class AutomationCore:
             self._input_blocked.clear()
             return True
 
+    def cancel_current(self, now: float) -> None:
+        with self._lock:
+            self._input_blocked.set()
+            try:
+                self.input_service.release_all()
+            except Exception as error:
+                raise InputActionError(str(error)) from error
+            self.state_machine.cancel_current(now)
+            self.bar_missing_frames = 0
+            self.result_candidate_frames = 0
+            self.pause_code = ""
+            self._error = ""
+            self._fps = 0.0
+
     def process(
         self,
         observation: SceneObservation,
@@ -256,13 +270,15 @@ class AutomationCore:
 
         self.bar_missing_frames += 1
         self.result_candidate_frames = (
-            self.result_candidate_frames + 1 if observation.result else 0
+            self.result_candidate_frames + 1
+            if observation.result_candidate
+            else 0
         )
         self._input(self.input_service.release_all)
         if self.result_candidate_frames >= 2:
             self.state_machine.handle(Event.BAR_GONE, now)
             return
-        if self.bar_missing_frames >= 6 and not observation.result:
+        if self.bar_missing_frames >= 6:
             self.pause(
                 "连续六帧未识别进度条",
                 now,
@@ -321,9 +337,11 @@ class AutomationEngine:
         self._start_decided.set()
         self._start_allowed = False
         self._starting = False
+        self._cancelling = False
         self._closing = False
         self._shutdown_started = False
         self._shutdown_event = threading.Event()
+        self._cancel_event = threading.Event()
         self._pause_epoch = 0
         self._resume_request: int | None = None
         self._latest_pause_reason = ""
@@ -347,7 +365,7 @@ class AutomationEngine:
 
     def bind(self, bound: Any) -> None:
         with self._lifecycle_lock:
-            if self.is_running or self._starting:
+            if self.is_running or self._starting or self._cancelling:
                 raise RuntimeError("自动化运行中不能更换绑定窗口")
             self._bound = bound
 
@@ -355,7 +373,7 @@ class AutomationEngine:
         with self._lifecycle_lock:
             if self._bound is None:
                 raise RuntimeError("请先绑定游戏窗口")
-            if self.is_running or self._starting:
+            if self.is_running or self._starting or self._cancelling:
                 raise RuntimeError("自动化已在运行")
             if self._shutdown_started and not self._cleanup_done.is_set():
                 raise RuntimeError("自动化仍在关闭中")
@@ -363,6 +381,7 @@ class AutomationEngine:
             self._cleanup_thread = None
             self._closing = False
             self._shutdown_event.clear()
+            self._cancel_event.clear()
             self._starting = True
             self._start_resolved = threading.Event()
             self._thread_start_done = threading.Event()
@@ -553,6 +572,33 @@ class AutomationEngine:
             if self._closing or self._start_allowed is not True:
                 return
         snapshot = self.core.snapshot
+        if snapshot.state is not FishingState.PAUSED:
+            return
+        try:
+            bound = self._require_bound()
+            activated = bool(self.window_service.activate(bound))
+            foreground = activated and bool(
+                self.window_service.is_foreground(bound)
+            )
+        except Exception as error:
+            detail = str(error)
+            foreground = False
+        else:
+            detail = "无法激活并确认已绑定的游戏窗口"
+        if not foreground:
+            with self._pause_lock:
+                if (
+                    not self._closing
+                    and requested_epoch == self._pause_epoch
+                    and self.core.snapshot.state is FishingState.PAUSED
+                ):
+                    self._pause(
+                        "E_WINDOW",
+                        detail,
+                        self._last_frame,
+                        replace_existing=True,
+                    )
+            return
         with self._pause_lock:
             if (
                 not self._closing
@@ -560,6 +606,51 @@ class AutomationEngine:
                 and snapshot.state is FishingState.PAUSED
             ):
                 self._resume_request = requested_epoch
+
+    def cancel_current(self) -> None:
+        deadline = time.monotonic() + 2.0
+        with self._lifecycle_lock:
+            if self._closing or self._cancelling:
+                return
+            if self._starting:
+                raise RuntimeError("自动化正在启动，暂时不能重新绑定")
+            self._cancelling = True
+            self._cancel_event.set()
+            with self._pause_lock:
+                self._pause_epoch += 1
+                self._resume_request = None
+                self._start_allowed = False
+
+        self.core.block_input()
+        self._stop_capture()
+        self._thread_start_done.wait(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+        worker = self._thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        if worker is not None and worker.is_alive():
+            with self._lifecycle_lock:
+                self._cancelling = False
+            raise RuntimeError("停止当前自动化轮次超时")
+
+        try:
+            with self._lifecycle_lock:
+                if self._closing:
+                    return
+                if self._thread is worker:
+                    self._thread = None
+                self._bound = None
+            self.core.cancel_current(self.clock())
+            self._diagnostic_recorded = False
+            self._last_frame = None
+            self._last_refresh = float("-inf")
+            self._publish()
+        finally:
+            with self._lifecycle_lock:
+                self._cancelling = False
+                if not self._closing:
+                    self._cancel_event.clear()
 
     def shutdown(self) -> None:
         deadline = time.monotonic() + 2.0
@@ -600,13 +691,15 @@ class AutomationEngine:
             if not capture_started:
                 return
 
-            while not self._shutdown_event.is_set():
+            while not self._stop_requested():
                 try:
                     packet = self.frame_source.latest()
                 except Exception as error:
+                    if self._stop_requested():
+                        break
                     self._pause("E_CAPTURE", str(error), self._last_frame)
                     break
-                if self._shutdown_event.is_set():
+                if self._stop_requested():
                     break
                 now = self.clock()
                 self._last_frame = packet.frame
@@ -673,9 +766,6 @@ class AutomationEngine:
                             and self.core.snapshot.state
                             is FishingState.PAUSED
                         )
-                        if resume_attempted:
-                            if self._resume_request == resume_token:
-                                self._resume_request = None
                     if not resume_attempted:
                         self._shutdown_event.wait(0.005)
                         continue
@@ -686,6 +776,8 @@ class AutomationEngine:
                             or resume_token != self._pause_epoch
                         )
                         if resumed and not resume_invalidated:
+                            if self._resume_request == resume_token:
+                                self._resume_request = None
                             self._diagnostic_recorded = False
                     if resumed and resume_invalidated:
                         self.core.pause(
@@ -767,6 +859,7 @@ class AutomationEngine:
         frame: np.ndarray | None,
         *,
         save_diagnostic: bool = True,
+        replace_existing: bool = False,
     ) -> None:
         with self._pause_lock:
             self._pause_epoch += 1
@@ -774,7 +867,7 @@ class AutomationEngine:
             pause_epoch = self._pause_epoch
             self._latest_pause_reason = detail
             self._latest_pause_code = code
-            replace_existing = self._starting
+            replace_existing = replace_existing or self._starting
         self.core.pause(
             detail,
             self.clock(),
@@ -849,10 +942,13 @@ class AutomationEngine:
 
     def _start_capture(self, device_index: int, output_index: int) -> bool:
         with self._capture_lock:
-            if self._shutdown_event.is_set():
+            if self._stop_requested():
                 return False
             self.frame_source.start(device_index, output_index)
             return True
+
+    def _stop_requested(self) -> bool:
+        return self._shutdown_event.is_set() or self._cancel_event.is_set()
 
     def _publish(self) -> None:
         snapshot = self.core.snapshot

@@ -155,6 +155,11 @@ class FakeUser32:
         self.dpi_fallback_calls = 0
         self.affinity_result = True
         self.activated_hwnd: int | None = None
+        self.ancestors = {123: 900}
+
+    def GetAncestor(self, hwnd: int, flags: int) -> int:
+        assert flags == 2
+        return self.ancestors.get(hwnd, hwnd)
 
     def SetProcessDpiAwarenessContext(self, _context) -> bool:
         return self.dpi_context_result
@@ -266,6 +271,12 @@ def test_bind_foreground_returns_screen_client_rect_and_unique_output() -> None:
         device_index=1,
         output_index=0,
     )
+
+
+def test_resolve_top_level_window_converts_nested_hwnd() -> None:
+    service = make_window_service(FakeUser32())
+
+    assert service.resolve_top_level(123) == 900
 
 
 @pytest.mark.parametrize(

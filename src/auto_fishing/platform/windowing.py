@@ -12,6 +12,7 @@ from auto_fishing.model import Rect
 
 
 MONITOR_DEFAULTTONEAREST = 2
+GA_ROOT = 2
 SW_RESTORE = 9
 WDA_EXCLUDEFROMCAPTURE = 0x11
 MIN_CLIENT_WIDTH = 960
@@ -130,6 +131,13 @@ class WindowService:
             device_index,
             output_index,
         )
+
+    def resolve_top_level(self, hwnd: int) -> int:
+        """Return the root top-level HWND that owns a Tk or child HWND."""
+        root_hwnd = int(self.user32.GetAncestor(hwnd, GA_ROOT) or 0)
+        if not root_hwnd:
+            raise WindowBindingError("无法解析控制窗口顶层句柄")
+        return root_hwnd
 
     def refresh(self, bound: BoundWindow) -> BoundWindow:
         if not self.user32.IsWindow(bound.hwnd):
