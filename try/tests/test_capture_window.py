@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -10,7 +11,13 @@ import pytest
 from auto_fishing.capture.dxcam_source import DxcamFrameSource
 from auto_fishing.model import Rect
 from auto_fishing.platform.hotkey import GlobalHotkey, WM_HOTKEY
-from auto_fishing.platform.windowing import BoundWindow, WindowBindingError, WindowService
+from auto_fishing.platform.windowing import (
+    BoundWindow,
+    DxcamOutput,
+    DxcamOutputCatalog,
+    WindowBindingError,
+    WindowService,
+)
 
 
 class FakeCamera:
@@ -41,13 +48,18 @@ def test_capture_uses_latest_frame_and_reports_rate() -> None:
             (np.ones((10, 10, 3), dtype=np.uint8), 1.04),
         ]
     )
-    source = DxcamFrameSource(camera_factory=lambda _: camera)
+    selected: list[tuple[int, int]] = []
+    source = DxcamFrameSource(
+        camera_factory=lambda device, output: selected.append((device, output))
+        or camera
+    )
 
-    source.start(0)
+    source.start(2, 3)
     source.latest()
     packet = source.latest()
 
     assert camera.started_fps == 30
+    assert selected == [(2, 3)]
     assert packet.frame.mean() == 1
     assert packet.timestamp == 1.04
     assert packet.fps == pytest.approx(25.0)
@@ -56,8 +68,8 @@ def test_capture_uses_latest_frame_and_reports_rate() -> None:
 def test_capture_reuses_last_packet_when_dxcam_has_no_new_frame() -> None:
     frame = np.ones((2, 2, 3), dtype=np.uint8)
     camera = FakeCamera([(frame, 1.0), None])
-    source = DxcamFrameSource(camera_factory=lambda _: camera)
-    source.start(0)
+    source = DxcamFrameSource(camera_factory=lambda _device, _output: camera)
+    source.start(0, 0)
 
     first = source.latest()
     second = source.latest()
@@ -67,8 +79,10 @@ def test_capture_reuses_last_packet_when_dxcam_has_no_new_frame() -> None:
 
 
 def test_capture_reports_missing_initial_frame() -> None:
-    source = DxcamFrameSource(camera_factory=lambda _: FakeCamera([None]))
-    source.start(0)
+    source = DxcamFrameSource(
+        camera_factory=lambda _device, _output: FakeCamera([None])
+    )
+    source.start(0, 0)
 
     with pytest.raises(RuntimeError, match="暂无可用截屏帧"):
         source.latest()
@@ -76,11 +90,13 @@ def test_capture_reports_missing_initial_frame() -> None:
 
 def test_capture_repeated_start_releases_old_camera_and_stop_is_idempotent() -> None:
     cameras = [FakeCamera(), FakeCamera()]
-    source = DxcamFrameSource(camera_factory=lambda _: cameras.pop(0))
+    source = DxcamFrameSource(
+        camera_factory=lambda _device, _output: cameras.pop(0)
+    )
 
-    source.start(0)
+    source.start(0, 0)
     first = source.camera
-    source.start(1)
+    source.start(1, 2)
 
     assert first.stop_calls == 1
     assert first.release_calls == 1
@@ -93,15 +109,47 @@ def test_capture_repeated_start_releases_old_camera_and_stop_is_idempotent() -> 
     assert second.release_calls == 1
 
 
+@dataclass(frozen=True)
+class FakeDxcamOutput:
+    devicename: str
+    resolution: tuple[int, int]
+
+
+@dataclass
+class FakeDxcamFactory:
+    outputs: list[list[FakeDxcamOutput]]
+
+
+def test_dxcam_output_catalog_preserves_device_and_output_indices() -> None:
+    factory = FakeDxcamFactory(
+        outputs=[
+            [FakeDxcamOutput(r"\\.\DISPLAY1", (1920, 1080))],
+            [
+                FakeDxcamOutput(r"\\.\DISPLAY2", (1920, 1080)),
+                FakeDxcamOutput(r"\\.\DISPLAY3", (2560, 1440)),
+            ],
+        ]
+    )
+
+    outputs = DxcamOutputCatalog(factory=lambda: factory).list_outputs()
+
+    assert outputs == [
+        DxcamOutput(0, 0, r"\\.\DISPLAY1", (1920, 1080)),
+        DxcamOutput(1, 0, r"\\.\DISPLAY2", (1920, 1080)),
+        DxcamOutput(1, 1, r"\\.\DISPLAY3", (2560, 1440)),
+    ]
+
+
 class FakeUser32:
     def __init__(self) -> None:
         self.foreground = 100
         self.iconic: set[int] = set()
         self.titles = {100: "异环"}
-        self.client_sizes = {100: (1920, 1080)}
-        self.client_origins = {100: (100, 50)}
+        self.client_sizes = {100: (1600, 900)}
+        self.client_origins = {100: (100, 100)}
         self.window_monitors = {100: 22}
         self.monitors = [(-1920, 0, 0, 1080, 11), (0, 0, 1920, 1080, 22)]
+        self.monitor_devices = {11: r"\\.\DISPLAY1", 22: r"\\.\DISPLAY2"}
         self.valid_windows = {100}
         self.dpi_context_result = True
         self.dpi_fallback_calls = 0
@@ -152,6 +200,19 @@ class FakeUser32:
     def MonitorFromWindow(self, hwnd: int, _flags: int) -> int:
         return self.window_monitors.get(hwnd, 0)
 
+    def GetMonitorInfoW(self, handle: int, info_pointer) -> bool:
+        matching = [entry for entry in self.monitors if entry[4] == handle]
+        if not matching:
+            return False
+        left, top, right, bottom, _handle = matching[0]
+        info = info_pointer._obj
+        info.rcMonitor.left = left
+        info.rcMonitor.top = top
+        info.rcMonitor.right = right
+        info.rcMonitor.bottom = bottom
+        info.szDevice = self.monitor_devices[handle]
+        return True
+
     def EnumDisplayMonitors(self, _hdc, _clip, callback, _data) -> bool:
         for left, top, right, bottom, handle in self.monitors:
             rect = callback._rect_type(left, top, right, bottom)
@@ -173,15 +234,21 @@ class FakeUser32:
 
 def make_window_service(
     user32: FakeUser32,
-    outputs: list[tuple[int, int]] | None = None,
+    outputs: list[list[FakeDxcamOutput]] | None = None,
     own_hwnd: int | None = None,
 ) -> WindowService:
+    factory = FakeDxcamFactory(
+        outputs=outputs
+        if outputs is not None
+        else [
+            [FakeDxcamOutput(r"\\.\DISPLAY1", (1920, 1080))],
+            [FakeDxcamOutput(r"\\.\DISPLAY2", (1920, 1080))],
+        ]
+    )
     return WindowService(
         user32=user32,
         own_hwnd=own_hwnd,
-        output_resolutions=lambda: outputs
-        if outputs is not None
-        else [(1920, 1080), (1920, 1080)],
+        output_catalog=DxcamOutputCatalog(factory=lambda: factory),
     )
 
 
@@ -194,9 +261,10 @@ def test_bind_foreground_returns_screen_client_rect_and_unique_output() -> None:
     assert bound == BoundWindow(
         hwnd=100,
         title="异环",
-        client_rect=Rect(100, 50, 2020, 1130),
+        client_rect=Rect(100, 100, 1700, 1000),
         monitor_rect=Rect(0, 0, 1920, 1080),
-        output_index=1,
+        device_index=1,
+        output_index=0,
     )
 
 
@@ -228,10 +296,20 @@ def test_bind_foreground_rejects_own_control_window() -> None:
 
 @pytest.mark.parametrize(
     "outputs",
-    [[(1920, 1080)], [(1920, 1080), (2560, 1440)]],
+    [
+        [[FakeDxcamOutput(r"\\.\DISPLAY1", (1920, 1080))]],
+        [
+            [FakeDxcamOutput(r"\\.\DISPLAY1", (1920, 1080))],
+            [FakeDxcamOutput(r"\\.\DISPLAY2", (2560, 1440))],
+        ],
+        [
+            [FakeDxcamOutput(r"\\.\DISPLAY2", (1920, 1080))],
+            [FakeDxcamOutput(r"\\.\DISPLAY2", (1920, 1080))],
+        ],
+    ],
 )
-def test_bind_foreground_rejects_missing_or_mismatched_dxcam_output(
-    outputs: list[tuple[int, int]],
+def test_bind_foreground_rejects_missing_mismatched_or_ambiguous_dxcam_output(
+    outputs: list[list[FakeDxcamOutput]],
 ) -> None:
     with pytest.raises(WindowBindingError, match="无法映射游戏所在显示器"):
         make_window_service(FakeUser32(), outputs=outputs).bind_foreground()
@@ -245,7 +323,7 @@ def test_refresh_rechecks_original_window_and_activate_verifies_foreground() -> 
 
     refreshed = service.refresh(original)
 
-    assert refreshed.client_rect == Rect(120, 80, 2040, 1160)
+    assert refreshed.client_rect == Rect(120, 80, 1720, 980)
     user32.foreground = 200
     assert service.is_foreground(original) is False
     assert service.activate(original) is True
@@ -259,6 +337,24 @@ def test_refresh_rejects_destroyed_window() -> None:
     user32.valid_windows.clear()
 
     with pytest.raises(WindowBindingError, match="窗口已失效"):
+        service.refresh(bound)
+
+
+def test_bind_foreground_rejects_client_area_crossing_monitor_boundary() -> None:
+    user32 = FakeUser32()
+    user32.client_origins[100] = (400, 100)
+
+    with pytest.raises(WindowBindingError, match="客户区跨越显示器边界"):
+        make_window_service(user32).bind_foreground()
+
+
+def test_refresh_rejects_client_area_crossing_monitor_boundary() -> None:
+    user32 = FakeUser32()
+    service = make_window_service(user32)
+    bound = service.bind_foreground()
+    user32.client_origins[100] = (400, 100)
+
+    with pytest.raises(WindowBindingError, match="客户区跨越显示器边界"):
         service.refresh(bound)
 
 
@@ -276,9 +372,11 @@ def test_dpi_awareness_falls_back_and_capture_exclusion_reports_result() -> None
 class FakeHotkeyUser32:
     def __init__(self, register_result: bool = True) -> None:
         self.register_result = register_result
+        self.post_result = True
         self.messages: list[int] = []
         self.condition = threading.Condition()
         self.unregister_calls = 0
+        self.unregistered = threading.Event()
 
     def RegisterHotKey(self, _window, hotkey_id: int, modifiers: int, key: int) -> bool:
         assert (hotkey_id, modifiers, key) == (1, 0, 0x77)
@@ -292,10 +390,14 @@ class FakeHotkeyUser32:
             message = self.messages.pop(0)
         if message == 0x0012:
             return 0
+        if message == -1:
+            return -1
         message_pointer._obj.message = message
         return 1
 
     def PostThreadMessageW(self, _thread_id: int, message: int, _wparam: int, _lparam: int) -> bool:
+        if not self.post_result:
+            return False
         with self.condition:
             self.messages.append(message)
             self.condition.notify_all()
@@ -304,6 +406,7 @@ class FakeHotkeyUser32:
     def UnregisterHotKey(self, _window, hotkey_id: int) -> bool:
         assert hotkey_id == 1
         self.unregister_calls += 1
+        self.unregistered.set()
         return True
 
     def emit_hotkey(self) -> None:
@@ -311,9 +414,25 @@ class FakeHotkeyUser32:
             self.messages.append(WM_HOTKEY)
             self.condition.notify_all()
 
+    def emit_message_error(self) -> None:
+        with self.condition:
+            self.messages.append(-1)
+            self.condition.notify_all()
+
 
 class FakeKernel32:
     def GetCurrentThreadId(self) -> int:
+        return 4321
+
+
+class BlockingKernel32:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def GetCurrentThreadId(self) -> int:
+        self.entered.set()
+        assert self.release.wait(timeout=1)
         return 4321
 
 
@@ -343,3 +462,78 @@ def test_hotkey_dispatches_f8_and_stops_message_thread_reliably() -> None:
 
     assert api.unregister_calls == 1
     assert hotkey.is_running is False
+
+
+def test_hotkey_stop_waits_for_startup_publication_and_leaves_no_thread() -> None:
+    api = FakeHotkeyUser32()
+    kernel32 = BlockingKernel32()
+    hotkey = GlobalHotkey(
+        user32=api,
+        kernel32=kernel32,
+        startup_timeout=1,
+        shutdown_timeout=1,
+    )
+    start_results: list[bool] = []
+    stop_errors: list[BaseException] = []
+    stop_entered = threading.Event()
+    starter = threading.Thread(target=lambda: start_results.append(hotkey.start(lambda: None)))
+
+    def stop_hotkey() -> None:
+        stop_entered.set()
+        try:
+            hotkey.stop()
+        except BaseException as error:
+            stop_errors.append(error)
+
+    starter.start()
+    assert kernel32.entered.wait(timeout=1)
+    stopper = threading.Thread(target=stop_hotkey)
+    stopper.start()
+    assert stop_entered.wait(timeout=1)
+    stopper.join(timeout=0.05)
+    stop_waited_for_startup = stopper.is_alive()
+
+    kernel32.release.set()
+    starter.join(timeout=1)
+    stopper.join(timeout=1)
+    api.PostThreadMessageW(4321, 0x0012, 0, 0)
+    api.unregistered.wait(timeout=1)
+
+    assert stop_waited_for_startup is True
+    assert starter.is_alive() is False
+    assert stopper.is_alive() is False
+    assert stop_errors == []
+    assert hotkey.is_running is False
+    assert api.unregister_calls == 1
+
+
+def test_hotkey_stop_reports_failed_quit_post_without_forgetting_thread() -> None:
+    api = FakeHotkeyUser32()
+    hotkey = GlobalHotkey(
+        user32=api,
+        kernel32=FakeKernel32(),
+        shutdown_timeout=0.05,
+    )
+    assert hotkey.start(lambda: None) is True
+    api.post_result = False
+
+    try:
+        with pytest.raises(RuntimeError, match="无法请求 F8 热键消息线程退出"):
+            hotkey.stop()
+        assert hotkey.is_running is True
+    finally:
+        api.post_result = True
+        hotkey.stop()
+
+
+def test_hotkey_get_message_error_is_visible_to_caller() -> None:
+    api = FakeHotkeyUser32()
+    hotkey = GlobalHotkey(user32=api, kernel32=FakeKernel32())
+    assert hotkey.start(lambda: None) is True
+
+    try:
+        api.emit_message_error()
+        assert api.unregistered.wait(timeout=1)
+        assert hotkey.last_error == "F8 热键消息循环读取失败"
+    finally:
+        hotkey.stop()

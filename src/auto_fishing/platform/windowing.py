@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -29,7 +28,33 @@ class BoundWindow:
     title: str
     client_rect: Rect
     monitor_rect: Rect
+    device_index: int
     output_index: int
+
+
+@dataclass(frozen=True)
+class DxcamOutput:
+    device_index: int
+    output_index: int
+    devicename: str
+    resolution: tuple[int, int]
+
+
+class DxcamOutputCatalog:
+    def __init__(self, factory: Callable[[], Any] | None = None) -> None:
+        self._factory = (factory or dxcam.DXFactory)()
+
+    def list_outputs(self) -> list[DxcamOutput]:
+        return [
+            DxcamOutput(
+                device_index=device_index,
+                output_index=output_index,
+                devicename=str(output.devicename),
+                resolution=tuple(output.resolution),
+            )
+            for device_index, device_outputs in enumerate(self._factory.outputs)
+            for output_index, output in enumerate(device_outputs)
+        ]
 
 
 class _WinRect(ctypes.Structure):
@@ -45,11 +70,14 @@ class _Point(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
 
-def _default_output_resolutions() -> list[tuple[int, int]]:
-    resolutions: list[tuple[int, int]] = []
-    for width, height in re.findall(r"Res:\((\d+),\s*(\d+)\)", dxcam.output_info()):
-        resolutions.append((int(width), int(height)))
-    return resolutions
+class _MonitorInfoEx(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", _WinRect),
+        ("rcWork", _WinRect),
+        ("dwFlags", wintypes.DWORD),
+        ("szDevice", wintypes.WCHAR * 32),
+    ]
 
 
 def _handle_value(handle: Any) -> int:
@@ -63,11 +91,11 @@ class WindowService:
         self,
         user32: Any | None = None,
         own_hwnd: int | None = None,
-        output_resolutions: Callable[[], list[tuple[int, int]]] | None = None,
+        output_catalog: DxcamOutputCatalog | None = None,
     ) -> None:
         self.user32 = user32 or ctypes.windll.user32
         self.own_hwnd = own_hwnd
-        self.output_resolutions = output_resolutions or _default_output_resolutions
+        self.output_catalog = output_catalog or DxcamOutputCatalog()
 
     def enable_dpi_awareness(self) -> None:
         try:
@@ -91,20 +119,32 @@ class WindowService:
         title = self._window_title(hwnd)
         if not title.strip():
             raise WindowBindingError("窗口标题为空")
-        client_rect, monitor_rect, output_index = self._window_geometry(hwnd)
-        return BoundWindow(hwnd, title, client_rect, monitor_rect, output_index)
+        client_rect, monitor_rect, device_index, output_index = (
+            self._window_geometry(hwnd)
+        )
+        return BoundWindow(
+            hwnd,
+            title,
+            client_rect,
+            monitor_rect,
+            device_index,
+            output_index,
+        )
 
     def refresh(self, bound: BoundWindow) -> BoundWindow:
         if not self.user32.IsWindow(bound.hwnd):
             raise WindowBindingError("窗口已失效")
         if self.user32.IsIconic(bound.hwnd):
             raise WindowBindingError("窗口已最小化")
-        client_rect, monitor_rect, output_index = self._window_geometry(bound.hwnd)
+        client_rect, monitor_rect, device_index, output_index = (
+            self._window_geometry(bound.hwnd)
+        )
         return BoundWindow(
             bound.hwnd,
             bound.title,
             client_rect,
             monitor_rect,
+            device_index,
             output_index,
         )
 
@@ -127,7 +167,7 @@ class WindowService:
         self.user32.GetWindowTextW(hwnd, buffer, len(buffer))
         return buffer.value
 
-    def _window_geometry(self, hwnd: int) -> tuple[Rect, Rect, int]:
+    def _window_geometry(self, hwnd: int) -> tuple[Rect, Rect, int, int]:
         native_rect = _WinRect()
         if not self.user32.GetClientRect(hwnd, ctypes.byref(native_rect)):
             raise WindowBindingError("无法读取窗口客户区")
@@ -155,56 +195,40 @@ class WindowService:
         )
         if not monitor_handle:
             raise WindowBindingError("无法映射游戏所在显示器")
-        monitors = self._enum_monitors()
-        matches = [
-            (index, rect)
-            for index, (handle, rect) in enumerate(monitors)
-            if handle == monitor_handle
+        monitor_rect, device_name = self._monitor_info(monitor_handle)
+        if not self._contains(monitor_rect, client_rect):
+            raise WindowBindingError("客户区跨越显示器边界")
+
+        outputs = [
+            output
+            for output in self.output_catalog.list_outputs()
+            if output.devicename == device_name
         ]
-        if len(matches) != 1:
+        if len(outputs) != 1:
             raise WindowBindingError("无法映射游戏所在显示器")
-        output_index, monitor_rect = matches[0]
-        self._validate_output(output_index, monitor_rect)
-        return client_rect, monitor_rect, output_index
+        output = outputs[0]
+        if output.resolution != (monitor_rect.width, monitor_rect.height):
+            raise WindowBindingError("无法映射游戏所在显示器")
+        return client_rect, monitor_rect, output.device_index, output.output_index
 
-    def _enum_monitors(self) -> list[tuple[int, Rect]]:
-        monitors: list[tuple[int, Rect]] = []
-
-        callback_type = ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HMONITOR,
-            wintypes.HDC,
-            ctypes.POINTER(_WinRect),
-            wintypes.LPARAM,
+    def _monitor_info(self, monitor_handle: int) -> tuple[Rect, str]:
+        info = _MonitorInfoEx()
+        info.cbSize = ctypes.sizeof(info)
+        if not self.user32.GetMonitorInfoW(monitor_handle, ctypes.byref(info)):
+            raise WindowBindingError("无法读取显示器信息")
+        monitor_rect = Rect(
+            int(info.rcMonitor.left),
+            int(info.rcMonitor.top),
+            int(info.rcMonitor.right),
+            int(info.rcMonitor.bottom),
         )
+        return monitor_rect, str(info.szDevice)
 
-        def collect(handle, _hdc, rect_pointer, _data) -> bool:
-            native_rect = rect_pointer.contents
-            monitors.append(
-                (
-                    _handle_value(handle),
-                    Rect(
-                        int(native_rect.left),
-                        int(native_rect.top),
-                        int(native_rect.right),
-                        int(native_rect.bottom),
-                    ),
-                )
-            )
-            return True
-
-        callback = callback_type(collect)
-        callback._rect_type = _WinRect
-        if not self.user32.EnumDisplayMonitors(None, None, callback, 0):
-            raise WindowBindingError("无法枚举显示器")
-        return monitors
-
-    def _validate_output(self, output_index: int, monitor_rect: Rect) -> None:
-        resolutions = self.output_resolutions()
-        if output_index >= len(resolutions):
-            raise WindowBindingError("无法映射游戏所在显示器")
-        if tuple(resolutions[output_index]) != (
-            monitor_rect.width,
-            monitor_rect.height,
-        ):
-            raise WindowBindingError("无法映射游戏所在显示器")
+    @staticmethod
+    def _contains(outer: Rect, inner: Rect) -> bool:
+        return (
+            outer.left <= inner.left
+            and outer.top <= inner.top
+            and inner.right <= outer.right
+            and inner.bottom <= outer.bottom
+        )

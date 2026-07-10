@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from time import monotonic
 from typing import Any
 
 import dxcam
@@ -15,24 +14,23 @@ class DxcamFrameSource:
 
     def __init__(
         self,
-        camera_factory: Callable[[int], Any] | None = None,
-        clock: Callable[[], float] = monotonic,
+        camera_factory: Callable[[int, int], Any] | None = None,
     ) -> None:
         self.camera_factory = camera_factory or (
-            lambda index: dxcam.create(
-                output_idx=index,
+            lambda device_index, output_index: dxcam.create(
+                device_idx=device_index,
+                output_idx=output_index,
                 output_color="BGR",
                 processor_backend="cv2",
             )
         )
-        self.clock = clock
         self.camera: Any | None = None
         self.timestamps: deque[float] = deque(maxlen=31)
         self._last_packet: FramePacket | None = None
 
-    def start(self, output_index: int) -> None:
+    def start(self, device_index: int, output_index: int) -> None:
         self.stop()
-        camera = self.camera_factory(output_index)
+        camera = self.camera_factory(device_index, output_index)
         self.camera = camera
         try:
             camera.start(target_fps=30)
