@@ -64,7 +64,7 @@
 
 ---
 
-### 任务 1：项目骨架、公共模型与归一化坐标
+### Task 1（任务 1）：项目骨架、公共模型与归一化坐标
 
 **文件：**
 
@@ -295,7 +295,7 @@ git commit -m "feat: establish typed automation foundation"
 
 ---
 
-### 任务 2：设置、诊断保存与自动删除
+### Task 2（任务 2）：设置、诊断保存与自动删除
 
 **文件：**
 
@@ -451,7 +451,7 @@ git commit -m "feat: add bounded diagnostic retention"
 
 ---
 
-### 任务 3：安全输入门面与 Windows SendInput
+### Task 3（任务 3）：安全输入门面与 Windows SendInput
 
 **文件：**
 
@@ -578,7 +578,7 @@ git commit -m "feat: add fail-safe Windows input"
 
 ---
 
-### 任务 4：窗口绑定、DPI、F8 与 30 帧截屏
+### Task 4（任务 4）：窗口绑定、DPI、F8 与 30 帧截屏
 
 **文件：**
 
@@ -724,7 +724,7 @@ git commit -m "feat: bind game window and capture latest frames"
 
 ---
 
-### 任务 5：顶部进度条识别与 A/D 控制策略
+### Task 5（任务 5）：顶部进度条识别与 A/D 控制策略
 
 **文件：**
 
@@ -838,7 +838,7 @@ git commit -m "feat: track fishing progress at thirty fps"
 
 ---
 
-### 任务 6：上钩、结算和就绪画面识别
+### Task 6（任务 6）：上钩、结算和就绪画面识别
 
 **文件：**
 
@@ -939,7 +939,7 @@ git commit -m "feat: recognize fishing scene transitions"
 
 ---
 
-### 任务 7：纯状态机、超时与成功计数
+### Task 7（任务 7）：纯状态机、超时与成功计数
 
 **文件：**
 
@@ -1047,7 +1047,7 @@ git commit -m "feat: add explicit fishing state machine"
 
 ---
 
-### 任务 8：自动化引擎、最新帧看门狗与安全暂停
+### Task 8（任务 8）：自动化引擎、最新帧看门狗与安全暂停
 
 **文件：**
 
@@ -1171,7 +1171,7 @@ git commit -m "feat: orchestrate safe fishing automation"
 
 ---
 
-### 任务 9：置顶界面、三秒绑定、F8 接线与程序入口
+### Task 9（任务 9）：置顶界面、三秒绑定、F8 接线与程序入口
 
 **文件：**
 
@@ -1288,7 +1288,7 @@ git commit -m "feat: add always-on-top control window"
 
 ---
 
-### 任务 10：单文件打包、离线验收、文档与分支收尾
+### Task 10（任务 10）：单文件打包、离线验收、文档与分支收尾
 
 **文件：**
 
