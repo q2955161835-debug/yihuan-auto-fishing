@@ -352,6 +352,27 @@ class SnapshotBarrierCore:
         return snapshot
 
 
+class StartBarrierCore:
+    def __init__(self, core: AutomationCore) -> None:
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "start_entered", threading.Event())
+        object.__setattr__(self, "allow_start", threading.Event())
+
+    def __getattr__(self, name: str):
+        return getattr(self.core, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in {"core", "start_entered", "allow_start"}:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.core, name, value)
+
+    def start(self, target: int, now: float) -> None:
+        self.start_entered.set()
+        assert self.allow_start.wait(timeout=1)
+        self.core.start(target, now)
+
+
 def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1150,6 +1171,45 @@ def test_start_thread_construction_failure_rolls_back_ready_core(
     assert core.input_blocked is True
     assert input_service.events[-1] == "release"
     assert engine.is_running is False
+
+
+def test_pause_during_pending_start_cancels_worker_with_latest_reason(
+    tmp_path,
+) -> None:
+    engine, core, input_service, _window, source = make_engine(tmp_path)
+    barrier_core = StartBarrierCore(core)
+    engine.core = barrier_core
+    start_errors: list[BaseException] = []
+
+    def start_engine() -> None:
+        try:
+            engine.start(1)
+        except BaseException as error:
+            start_errors.append(error)
+
+    start_thread = threading.Thread(target=start_engine)
+    start_thread.start()
+    assert barrier_core.start_entered.wait(timeout=1)
+
+    engine.pause("first pending-start pause")
+    engine.pause("F8 latest pending-start pause")
+    barrier_core.allow_start.set()
+    start_thread.join(timeout=1)
+    time.sleep(0.05)
+
+    try:
+        assert start_thread.is_alive() is False
+        assert len(start_errors) == 1
+        assert "pause" in str(start_errors[0]).lower()
+        assert core.snapshot.state is FishingState.PAUSED
+        assert core.snapshot.error == "F8 latest pending-start pause"
+        assert core.input_blocked is True
+        assert input_service.events[-1] == "release"
+        assert "F" not in input_service.events
+        assert source.started == []
+        assert engine.is_running is False
+    finally:
+        engine.shutdown()
 
 
 def test_shutdown_budget_includes_core_process_holding_lock(tmp_path) -> None:

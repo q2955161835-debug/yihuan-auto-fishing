@@ -97,11 +97,19 @@ class AutomationCore:
             except Exception as error:
                 raise InputActionError(str(error)) from error
 
-    def pause(self, reason: str, now: float, *, code: str = "E_USER_PAUSE") -> None:
+    def pause(
+        self,
+        reason: str,
+        now: float,
+        *,
+        code: str = "E_USER_PAUSE",
+        replace_existing: bool = False,
+    ) -> None:
         with self._lock:
             was_paused = self.state_machine.state is FishingState.PAUSED
-            final_reason = self._error if was_paused else reason
-            final_code = self.pause_code if was_paused else code
+            preserve_existing = was_paused and not replace_existing
+            final_reason = self._error if preserve_existing else reason
+            final_code = self.pause_code if preserve_existing else code
             self._input_blocked.set()
             try:
                 self.input_service.release_all()
@@ -307,6 +315,8 @@ class AutomationEngine:
         self._shutdown_event = threading.Event()
         self._pause_epoch = 0
         self._resume_request: int | None = None
+        self._latest_pause_reason = ""
+        self._latest_pause_code = "E_USER_PAUSE"
         self._callbacks: list[Callable[[RuntimeSnapshot], None]] = []
         self._lifecycle_lock = threading.RLock()
         self._capture_lock = threading.Lock()
@@ -350,6 +360,9 @@ class AutomationEngine:
             with self._pause_lock:
                 self._pause_epoch += 1
                 self._resume_request = None
+                self._latest_pause_reason = ""
+                self._latest_pause_code = "E_USER_PAUSE"
+                start_epoch = self._pause_epoch
             self._diagnostic_recorded = False
             self._last_frame = None
             self._last_refresh = float("-inf")
@@ -359,12 +372,6 @@ class AutomationEngine:
         try:
             self.core.start(target, self.clock())
             core_started = True
-            worker = threading.Thread(
-                target=self._run_after_publish,
-                args=(publish_done,),
-                name="auto-fishing-worker",
-                daemon=True,
-            )
         except BaseException as error:
             with self._lifecycle_lock:
                 self._starting = False
@@ -379,16 +386,67 @@ class AutomationEngine:
                 )
             raise
 
+        with self._pause_lock:
+            start_cancelled = (
+                self._closing or self._pause_epoch != start_epoch
+            )
+        if start_cancelled:
+            self._compensate_cancelled_start()
+            with self._lifecycle_lock:
+                self._starting = False
+                start_resolved.set()
+                thread_start_done.set()
+            raise RuntimeError("startup cancelled by pause or shutdown")
+
+        try:
+            worker = threading.Thread(
+                target=self._run_after_publish,
+                args=(publish_done, start_epoch),
+                name="auto-fishing-worker",
+                daemon=True,
+            )
+        except BaseException as error:
+            with self._lifecycle_lock:
+                self._starting = False
+                start_resolved.set()
+                thread_start_done.set()
+            self._pause(
+                "E_AUTOMATION",
+                f"无法准备自动化工作线程: {error}",
+                None,
+                save_diagnostic=False,
+            )
+            raise
+
         with self._lifecycle_lock:
-            cancelled = self._closing or self._shutdown_started
+            with self._pause_lock:
+                cancelled = (
+                    self._closing
+                    or self._shutdown_started
+                    or self._pause_epoch != start_epoch
+                )
             if not cancelled:
                 self._thread = worker
-            self._starting = False if cancelled else self._starting
-            start_resolved.set()
-            if cancelled:
-                thread_start_done.set()
         if cancelled:
-            raise RuntimeError("自动化启动已被关闭取消")
+            self._compensate_cancelled_start()
+            with self._lifecycle_lock:
+                self._starting = False
+                start_resolved.set()
+                thread_start_done.set()
+            raise RuntimeError("startup cancelled by pause or shutdown")
+        start_resolved.set()
+
+        with self._pause_lock:
+            cancelled = self._closing or self._pause_epoch != start_epoch
+        if cancelled:
+            self._compensate_cancelled_start()
+            with self._lifecycle_lock:
+                if self._thread is worker:
+                    self._thread = None
+                self._starting = False
+                thread_start_done.set()
+            publish_done.set()
+            raise RuntimeError("startup cancelled by pause or shutdown")
 
         try:
             worker.start()
@@ -449,6 +507,8 @@ class AutomationEngine:
             with self._pause_lock:
                 self._pause_epoch += 1
                 self._resume_request = None
+                self._latest_pause_reason = "程序关闭"
+                self._latest_pause_code = "E_USER_PAUSE"
             self._cleanup_done.clear()
             self._cleanup_thread = threading.Thread(
                 target=self._cleanup_shutdown,
@@ -609,8 +669,15 @@ class AutomationEngine:
             if not self._closing:
                 self._stop_capture()
 
-    def _run_after_publish(self, publish_done: threading.Event) -> None:
+    def _run_after_publish(
+        self,
+        publish_done: threading.Event,
+        start_epoch: int,
+    ) -> None:
         publish_done.wait()
+        with self._pause_lock:
+            if self._closing or self._pause_epoch != start_epoch:
+                return
         self._run()
 
     def _pause(
@@ -624,12 +691,24 @@ class AutomationEngine:
         with self._pause_lock:
             self._pause_epoch += 1
             self._resume_request = None
-        self.core.pause(detail, self.clock(), code=code)
+            pause_epoch = self._pause_epoch
+            self._latest_pause_reason = detail
+            self._latest_pause_code = code
+            replace_existing = self._starting
+        self.core.pause(
+            detail,
+            self.clock(),
+            code=code,
+            replace_existing=replace_existing,
+        )
         actual_code = self.core.pause_code
         actual_detail = self.core.snapshot.error
 
         save_diagnostic_now = False
         with self._pause_lock:
+            if pause_epoch == self._pause_epoch:
+                self._latest_pause_reason = actual_detail
+                self._latest_pause_code = actual_code
             should_save = save_diagnostic or actual_code == "E_INPUT"
             if (
                 should_save
@@ -644,6 +723,22 @@ class AutomationEngine:
             except Exception as error:
                 self.logger.warning("保存诊断失败: %s", error)
         self._publish()
+
+    def _compensate_cancelled_start(self) -> None:
+        while True:
+            with self._pause_lock:
+                pause_epoch = self._pause_epoch
+                reason = self._latest_pause_reason or "启动已被暂停"
+                code = self._latest_pause_code
+            self.core.pause(
+                reason,
+                self.clock(),
+                code=code,
+                replace_existing=True,
+            )
+            with self._pause_lock:
+                if pause_epoch == self._pause_epoch:
+                    return
 
     def _cleanup_shutdown(self) -> None:
         try:
