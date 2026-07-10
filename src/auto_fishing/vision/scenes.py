@@ -54,7 +54,7 @@ class SceneRecognizer:
         self.ready_consecutive = 0
 
     def set_bite_baseline(self, client_frame: np.ndarray) -> None:
-        self.bite_detector.set_baseline(crop_normalized(client_frame, TOP_ROI))
+        self.bite_detector.set_baseline(crop_normalized(client_frame, READY_ROI))
 
     def observe(self, client_frame: np.ndarray, timestamp: float) -> SceneObservation:
         top = crop_normalized(client_frame, TOP_ROI)
@@ -62,7 +62,7 @@ class SceneRecognizer:
         result_roi = crop_normalized(client_frame, RESULT_ROI)
 
         progress = self.progress_recognizer.detect(top, timestamp)
-        bite = self.bite_detector.detect(top)
+        bite = self.bite_detector.detect(ready_roi)
         result_candidate = (
             progress is None
             and _dark_ratio(result_roi) > 0.45
@@ -71,7 +71,7 @@ class SceneRecognizer:
         ready_candidate = (
             progress is None
             and _white_ratio(ready_roi) > 0.01
-            and _blue_ratio(top) < 0.03
+            and _blue_ratio(ready_roi) < 0.03
             and not result_candidate
         )
 

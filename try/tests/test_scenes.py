@@ -62,12 +62,18 @@ def add_progress(image: np.ndarray) -> None:
     )
 
 
-def add_bite_to_top_roi(image: np.ndarray) -> None:
+def add_bite_to_ready_roi(image: np.ndarray) -> None:
     height, width = image.shape[:2]
-    top_height = round(height * 0.15)
-    center = (round(width * 0.50), round(top_height * 0.50))
-    cv2.circle(image, center, round(top_height * 0.42), BLUE_BGR, -1)
-    cv2.circle(image, center, round(top_height * 0.25), (255, 255, 255), -1)
+    roi_short_side = min(round(width * 0.16), round(height * 0.32))
+    center = (round(width * 0.92), round(height * 0.84))
+    cv2.circle(image, center, round(roi_short_side * 0.38), BLUE_BGR, -1)
+    cv2.circle(
+        image,
+        center,
+        round(roi_short_side * 0.22),
+        (255, 255, 255),
+        -1,
+    )
 
 
 def test_bite_requires_two_changed_frames_and_blue_shape_cross_feature() -> None:
@@ -113,13 +119,13 @@ def test_blue_change_without_shape_change_does_not_trigger_bite() -> None:
 
 
 @pytest.mark.parametrize("size", [(1280, 720), (1920, 1080), (1600, 1000)])
-def test_scene_bite_baseline_and_top_roi_scale_with_client_resolution(
+def test_scene_bite_baseline_and_ready_roi_scale_with_client_resolution(
     size: tuple[int, int],
 ) -> None:
     width, height = size
     baseline = np.zeros((height, width, 3), dtype=np.uint8)
     changed = baseline.copy()
-    add_bite_to_top_roi(changed)
+    add_bite_to_ready_roi(changed)
     recognizer = SceneRecognizer()
 
     recognizer.set_bite_baseline(baseline)
@@ -173,6 +179,16 @@ def test_ready_confirmation_resets_when_candidate_disappears() -> None:
     assert recognizer.observe(candidate, 1.3).ready is False
     assert recognizer.observe(candidate, 1.4).ready is False
     assert recognizer.observe(candidate, 1.5).ready is True
+
+
+def test_ready_rejects_blue_bite_ring_in_ready_roi() -> None:
+    recognizer = SceneRecognizer()
+    frame = ready_frame()
+    add_bite_to_ready_roi(frame)
+
+    assert recognizer.observe(frame, 1.0).ready is False
+    assert recognizer.observe(frame, 1.1).ready is False
+    assert recognizer.observe(frame, 1.2).ready is False
 
 
 def test_result_and_ready_are_mutually_exclusive() -> None:
