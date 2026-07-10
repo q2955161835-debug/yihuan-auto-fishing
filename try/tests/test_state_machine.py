@@ -129,6 +129,19 @@ def test_inter_round_waits_one_second_before_returning_ready() -> None:
     assert state_machine.entered_at == 3.0
 
 
+def test_early_inter_round_event_is_illegal_without_mutation() -> None:
+    state_machine = FishingStateMachine()
+    state_machine.start(2, 0.0)
+    advance_round_to_result_clicked(state_machine, 1.0)
+    state_machine.handle(Event.READY_DETECTED, 2.0)
+    before = stateful_values(state_machine)
+
+    with pytest.raises(ValueError, match="INTERVAL_ELAPSED"):
+        state_machine.handle(Event.INTERVAL_ELAPSED, 2.999)
+
+    assert stateful_values(state_machine) == before
+
+
 @pytest.mark.parametrize("target", [1, 999])
 def test_start_accepts_target_boundaries(target: int) -> None:
     state_machine = FishingStateMachine()
@@ -148,6 +161,17 @@ def test_start_rejects_target_outside_boundaries_without_mutation(target: int) -
 
     with pytest.raises(ValueError, match="1.*999"):
         state_machine.start(target, 1.0)
+
+    assert stateful_values(state_machine) == before
+
+
+@pytest.mark.parametrize("target", [True, False, 1.0, 999.0])
+def test_start_rejects_non_integer_targets_without_mutation(target: object) -> None:
+    state_machine = FishingStateMachine()
+    before = stateful_values(state_machine)
+
+    with pytest.raises(ValueError, match="1.*999"):
+        state_machine.start(target, 1.0)  # type: ignore[arg-type]
 
     assert stateful_values(state_machine) == before
 
@@ -202,6 +226,48 @@ def test_pause_records_reason_and_original_state_then_resumes_by_classification(
 
     assert state_machine.state is expected_state
     assert state_machine.entered_at == 13.0
+
+
+@pytest.mark.parametrize("resume_event", [Event.RESUME_CONTROL, Event.RESUME_READY])
+def test_pause_and_resume_classification_clear_result_click_marker(
+    resume_event: Event,
+) -> None:
+    state_machine = FishingStateMachine()
+    state_machine.start(1, 0.0)
+    advance_round_to_result_clicked(state_machine, 1.0)
+    assert state_machine.result_clicked is True
+
+    state_machine.pause("F8", 2.0)
+
+    assert state_machine.result_clicked is False
+
+    state_machine.handle(resume_event, 3.0)
+
+    assert state_machine.result_clicked is False
+
+
+def test_old_result_click_cannot_count_a_later_unclicked_result() -> None:
+    state_machine = FishingStateMachine()
+    state_machine.start(1, 0.0)
+    advance_round_to_result_clicked(state_machine, 1.0)
+    state_machine.pause("F8", 2.0)
+    state_machine.handle(Event.RESUME_CONTROL, 3.0)
+
+    assert state_machine.state is FishingState.CONTROL
+    assert state_machine.result_clicked is False
+
+    state_machine.handle(Event.BAR_GONE, 4.0)
+    assert state_machine.state is FishingState.WAIT_RESULT
+    assert state_machine.result_clicked is False
+
+    state_machine.handle(Event.RESULT_DETECTED, 5.0)
+    before = stateful_values(state_machine)
+
+    with pytest.raises(ValueError, match="READY_DETECTED"):
+        state_machine.handle(Event.READY_DETECTED, 6.0)
+
+    assert stateful_values(state_machine) == before
+    assert state_machine.completed == 0
 
 
 def test_timeout_check_is_inert_for_untimed_states() -> None:

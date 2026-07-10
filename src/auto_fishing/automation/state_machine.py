@@ -52,8 +52,8 @@ class FishingStateMachine:
         self.result_clicked = False
 
     def start(self, target: int, now: float) -> None:
-        if not 1 <= target <= 999:
-            raise ValueError("target must be between 1 and 999")
+        if type(target) is not int or not 1 <= target <= 999:
+            raise ValueError("target must be an integer between 1 and 999")
 
         self.state = FishingState.READY
         self.target = target
@@ -79,13 +79,20 @@ class FishingStateMachine:
             self.entered_at = now
             return
 
+        if (
+            self.state is FishingState.INTER_ROUND
+            and event is Event.INTERVAL_ELAPSED
+            and now - self.entered_at < TIMEOUTS[FishingState.INTER_ROUND]
+        ):
+            raise ValueError(f"illegal event {event.name} before interval elapsed")
+
         next_state = TRANSITIONS.get((self.state, event))
         if next_state is None:
             raise ValueError(f"illegal event {event.name} in state {self.state.name}")
 
         if event is Event.RESULT_CLICKED:
             self.result_clicked = True
-        elif event is Event.INTERVAL_ELAPSED or event is Event.RESUME_READY:
+        else:
             self.result_clicked = False
 
         self.state = next_state
@@ -97,6 +104,7 @@ class FishingStateMachine:
         self.state = FishingState.PAUSED
         self.pause_reason = reason
         self.entered_at = now
+        self.result_clicked = False
 
     def check_timeout(self, now: float) -> bool:
         timeout = TIMEOUTS.get(self.state)
