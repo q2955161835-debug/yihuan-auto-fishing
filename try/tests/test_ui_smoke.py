@@ -1,3 +1,7 @@
+from pathlib import Path
+import subprocess
+import sys
+import threading
 import tkinter as tk
 
 import pytest
@@ -39,11 +43,12 @@ class FakeController:
 
 
 class FakeSettings:
-    def __init__(self) -> None:
+    def __init__(self, loaded: AppSettings | None = None) -> None:
         self.saved: AppSettings | None = None
+        self.loaded = loaded or AppSettings()
 
     def load(self) -> AppSettings:
-        return AppSettings()
+        return self.loaded
 
     def save(self, settings: AppSettings) -> None:
         self.saved = settings
@@ -79,7 +84,32 @@ def test_window_is_topmost_and_validates_count(root) -> None:
 
     window.count_var.set("3")
     window.on_start()
+    assert controller.calls == []
+
+    window.on_bind()
+    assert controller.bind_callbacks is not None
+    _on_tick, on_done = controller.bind_callbacks
+    on_done("异环", None)
+    controller.calls.clear()
+    window.on_start()
     assert controller.calls == [("start", 3)]
+
+
+def test_window_geometry_supports_negative_monitor_coordinates(root) -> None:
+    controller = FakeController()
+    original_geometry = root.geometry
+    requested: list[str] = []
+    root.geometry = lambda value: requested.append(value)  # type: ignore[method-assign]
+    try:
+        MainWindow(
+            root,
+            controller,
+            FakeSettings(AppSettings(window_x=-1920, window_y=20)),
+        )
+    finally:
+        root.geometry = original_geometry  # type: ignore[method-assign]
+
+    assert requested == ["320x240-1920+20"]
 
 
 def test_binding_callbacks_update_visible_status(root) -> None:
@@ -176,13 +206,19 @@ class ManualScheduler:
     def __init__(self) -> None:
         self.delays: list[int] = []
         self.pending: list[object] = []
+        self.pending_delays: list[int] = []
+        self.calling_threads: list[int] = []
 
     def __call__(self, delay: int, callback) -> None:
         self.delays.append(delay)
         self.pending.append(callback)
+        self.pending_delays.append(delay)
+        self.calling_threads.append(threading.get_ident())
 
-    def run_next(self) -> None:
-        callback = self.pending.pop(0)
+    def run_next(self, delay: int | None = None) -> None:
+        index = 0 if delay is None else self.pending_delays.index(delay)
+        callback = self.pending.pop(index)
+        self.pending_delays.pop(index)
         callback()  # type: ignore[operator]
 
 
@@ -190,6 +226,11 @@ class BridgeEngine:
     def __init__(self, events: list[object] | None = None) -> None:
         self.calls: list[object] = []
         self.events = events
+        self.running = False
+
+    @property
+    def is_running(self) -> bool:
+        return self.running
 
     def subscribe(self, callback) -> None:
         self.calls.append(("subscribe", callback))
@@ -216,6 +257,82 @@ class BridgeEngine:
             self.events.append("engine.shutdown")
 
 
+class BlockingPauseEngine(BridgeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_entered = threading.Event()
+        self.allow_pause = threading.Event()
+        self.shutdown_entered = threading.Event()
+
+    def pause(self, reason: str) -> None:
+        self.pause_entered.set()
+        if not self.allow_pause.wait(1.0):
+            raise RuntimeError("test did not release pause")
+        super().pause(reason)
+
+    def shutdown(self) -> None:
+        self.shutdown_entered.set()
+        super().shutdown()
+
+
+class BlockingShutdownEngine(BridgeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_entered = threading.Event()
+        self.allow_shutdown = threading.Event()
+
+    def shutdown(self) -> None:
+        self.shutdown_entered.set()
+        if not self.allow_shutdown.wait(1.0):
+            raise RuntimeError("test did not release shutdown")
+        super().shutdown()
+
+
+class PublishingShutdownEngine(BridgeEngine):
+    def shutdown(self) -> None:
+        publish_thread = threading.Thread(
+            target=lambda: self.subscriber(
+                RuntimeSnapshot(FishingState.PAUSED, 0, 2, 0.0)
+            )
+        )
+        publish_thread.start()
+        publish_thread.join(0.2)
+        if publish_thread.is_alive():
+            raise RuntimeError("shutdown callback deadlocked")
+        super().shutdown()
+
+
+class BlockingStartEngine(BridgeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = threading.Event()
+        self.allow_start = threading.Event()
+        self.pause_entered = threading.Event()
+
+    def start(self, target: int) -> None:
+        self.start_entered.set()
+        if not self.allow_start.wait(1.0):
+            raise RuntimeError("test did not release start")
+        super().start(target)
+
+    def pause(self, reason: str) -> None:
+        self.pause_entered.set()
+        super().pause(reason)
+
+
+class PublishingPauseEngine(BridgeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_entered = threading.Event()
+
+    def pause(self, reason: str) -> None:
+        self.pause_entered.set()
+        self.subscriber(
+            RuntimeSnapshot(FishingState.PAUSED, 0, 2, 30.0, reason)
+        )
+        super().pause(reason)
+
+
 class BindingService:
     def __init__(self) -> None:
         self.bound = type("Bound", (), {"title": "异环"})()
@@ -224,6 +341,17 @@ class BindingService:
     def bind_foreground(self):
         self.calls += 1
         return self.bound
+
+
+class SequenceBindingService:
+    def __init__(self, *outcomes: object) -> None:
+        self.outcomes = list(outcomes)
+
+    def bind_foreground(self):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
 
 def test_controller_counts_down_asynchronously_before_binding() -> None:
@@ -253,6 +381,53 @@ def test_controller_counts_down_asynchronously_before_binding() -> None:
     assert completed == [("异环", None)]
 
 
+def test_first_binding_failure_stays_unbound_and_keeps_start_disabled(root) -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(
+        engine,
+        SequenceBindingService(RuntimeError("无法读取前台窗口")),
+        scheduler,
+    )
+    window = MainWindow(root, controller, FakeSettings())
+
+    window.on_bind()
+    for _ in range(3):
+        scheduler.run_next(1000)
+
+    assert window.binding_var.get() == "未绑定"
+    assert window.start_button.instate(["disabled"])
+    assert window.error_var.get() == "无法读取前台窗口"
+
+
+def test_failed_rebind_preserves_old_binding_and_can_start(root) -> None:
+    old_bound = type("Bound", (), {"title": "旧窗口"})()
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(
+        engine,
+        SequenceBindingService(old_bound, RuntimeError("新窗口无效")),
+        scheduler,
+    )
+    window = MainWindow(root, controller, FakeSettings())
+
+    window.on_bind()
+    for _ in range(3):
+        scheduler.run_next(1000)
+    assert window.binding_var.get() == "已绑定：旧窗口"
+
+    window.on_rebind()
+    for _ in range(3):
+        scheduler.run_next(1000)
+    assert window.binding_var.get() == "绑定失败，仍绑定：旧窗口"
+    assert not window.start_button.instate(["disabled"])
+
+    window.count_var.set("2")
+    window.on_start()
+    assert engine.calls[-1] == ("start", 2)
+    assert engine.calls.count(("bind", old_bound)) == 1
+
+
 def test_controller_bridges_engine_commands_and_cancels_countdown_on_shutdown() -> None:
     scheduler = ManualScheduler()
     engine = BridgeEngine()
@@ -278,9 +453,222 @@ def test_controller_bridges_engine_commands_and_cancels_countdown_on_shutdown() 
     assert completed == []
 
 
-def test_controller_only_forwards_f8_while_automation_can_pause() -> None:
+def test_controller_ignores_all_commands_after_shutdown() -> None:
     engine = BridgeEngine()
     controller = AppController(engine, BindingService(), ManualScheduler())
+    controller.shutdown()
+    calls_after_shutdown = list(engine.calls)
+    ticks: list[int] = []
+    completed: list[tuple[str | None, str | None]] = []
+
+    controller.start(2)
+    controller.pause("F8 紧急暂停")
+    controller.pause()
+    controller.resume()
+    controller.bind_after_countdown(
+        ticks.append,
+        lambda title, error: completed.append((title, error)),
+    )
+    controller.rebind(
+        ticks.append,
+        lambda title, error: completed.append((title, error)),
+    )
+
+    assert engine.calls == calls_after_shutdown
+    assert ticks == []
+    assert completed == []
+
+
+def test_shutdown_does_not_enter_engine_while_f8_pause_is_in_flight() -> None:
+    engine = BlockingPauseEngine()
+    scheduler = ManualScheduler()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+    scheduler.run_next(10)
+    pause_thread = threading.Thread(
+        target=lambda: controller.pause("F8 紧急暂停")
+    )
+    shutdown_thread = threading.Thread(target=controller.shutdown)
+
+    pause_thread.start()
+    assert engine.pause_entered.wait(1.0)
+    shutdown_thread.start()
+    try:
+        assert not engine.shutdown_entered.wait(0.1)
+    finally:
+        engine.allow_pause.set()
+        pause_thread.join(1.0)
+        shutdown_thread.join(1.0)
+    assert not pause_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert engine.calls[-2:] == [("pause", "F8 紧急暂停"), "shutdown"]
+
+
+def test_f8_returns_during_in_flight_shutdown_without_engine_call() -> None:
+    engine = BlockingShutdownEngine()
+    scheduler = ManualScheduler()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+    scheduler.run_next(10)
+    pause_finished = threading.Event()
+    shutdown_thread = threading.Thread(target=controller.shutdown)
+    pause_thread = threading.Thread(
+        target=lambda: (
+            controller.pause("F8 紧急暂停"),
+            pause_finished.set(),
+        )
+    )
+
+    shutdown_thread.start()
+    assert engine.shutdown_entered.wait(1.0)
+    pause_thread.start()
+    try:
+        assert pause_finished.wait(0.1)
+    finally:
+        engine.allow_shutdown.set()
+        shutdown_thread.join(1.0)
+        pause_thread.join(1.0)
+
+    assert pause_finished.is_set()
+    assert engine.calls == [
+        ("subscribe", engine.subscriber),
+        "shutdown",
+    ]
+
+
+def test_shutdown_does_not_hold_command_lock_during_engine_callbacks() -> None:
+    engine = PublishingShutdownEngine()
+    controller = AppController(engine, BindingService(), ManualScheduler())
+    controller.subscribe(lambda _snapshot: None)
+
+    controller.shutdown()
+
+    assert engine.calls[-1] == "shutdown"
+
+
+def test_f8_can_cancel_while_start_is_blocked() -> None:
+    engine = BlockingStartEngine()
+    controller = AppController(engine, BindingService(), ManualScheduler())
+    start_thread = threading.Thread(target=lambda: controller.start(2))
+    pause_thread = threading.Thread(
+        target=lambda: controller.pause("F8 紧急暂停")
+    )
+
+    start_thread.start()
+    assert engine.start_entered.wait(1.0)
+    pause_thread.start()
+    try:
+        assert engine.pause_entered.wait(0.1)
+    finally:
+        engine.allow_start.set()
+        start_thread.join(1.0)
+        pause_thread.join(1.0)
+
+    assert not start_thread.is_alive()
+    assert not pause_thread.is_alive()
+    assert ("pause", "F8 紧急暂停") in engine.calls
+
+
+def test_pause_publish_cannot_deadlock_main_thread_shutdown() -> None:
+    scheduler = ManualScheduler()
+    engine = PublishingPauseEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+    shutdown_finished = threading.Event()
+
+    def subscriber(snapshot: RuntimeSnapshot) -> None:
+        if snapshot.state is FishingState.PAUSED:
+            callback_entered.set()
+            release_callback.wait(1.0)
+
+    controller.subscribe(subscriber)
+    engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+    if scheduler.pending:
+        scheduler.run_next()
+    pause_thread = threading.Thread(
+        target=lambda: controller.pause("F8 紧急暂停")
+    )
+    shutdown_thread = threading.Thread(
+        target=lambda: (controller.shutdown(), shutdown_finished.set())
+    )
+
+    pause_thread.start()
+    assert engine.pause_entered.wait(1.0)
+    shutdown_thread.start()
+    try:
+        assert not callback_entered.wait(0.1)
+        assert shutdown_finished.wait(0.2)
+    finally:
+        release_callback.set()
+        pause_thread.join(1.0)
+        shutdown_thread.join(1.0)
+
+    assert not pause_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+
+
+def test_worker_snapshot_publish_never_calls_tk_scheduler() -> None:
+    main_thread = threading.get_ident()
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    received: list[RuntimeSnapshot] = []
+    controller.subscribe(received.append)
+    snapshot = RuntimeSnapshot(FishingState.READY, 0, 2, 30.0)
+
+    worker = threading.Thread(target=lambda: engine.publish(snapshot))
+    worker.start()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert scheduler.calling_threads == [main_thread]
+    assert received == []
+    scheduler.run_next()
+    assert received == [snapshot]
+
+
+def test_snapshot_state_guards_f8_before_main_thread_drain() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.subscribe(lambda _snapshot: None)
+
+    engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+    controller.pause("F8 紧急暂停")
+    assert engine.calls[-1] == ("pause", "F8 紧急暂停")
+
+    engine.publish(RuntimeSnapshot(FishingState.COMPLETE, 2, 2, 30.0))
+    calls_before_f8 = list(engine.calls)
+    controller.pause("F8 紧急暂停")
+    assert engine.calls == calls_before_f8
+
+
+def test_draining_older_snapshots_cannot_roll_back_f8_guard_state() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+
+    def pause_on_ready(snapshot: RuntimeSnapshot) -> None:
+        if snapshot.state is FishingState.READY:
+            controller.pause("F8 紧急暂停")
+
+    controller.subscribe(pause_on_ready)
+    engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+    engine.publish(RuntimeSnapshot(FishingState.COMPLETE, 2, 2, 30.0))
+    calls_before_drain = list(engine.calls)
+
+    scheduler.run_next(10)
+
+    assert engine.calls == calls_before_drain
+
+
+def test_controller_only_forwards_f8_while_automation_can_pause() -> None:
+    engine = BridgeEngine()
+    scheduler = ManualScheduler()
+    controller = AppController(engine, BindingService(), scheduler)
     snapshots: list[RuntimeSnapshot] = []
     controller.subscribe(snapshots.append)
 
@@ -289,10 +677,42 @@ def test_controller_only_forwards_f8_while_automation_can_pause() -> None:
 
     ready = RuntimeSnapshot(FishingState.READY, 0, 3, 30.0)
     engine.publish(ready)
+    scheduler.run_next(10)
     controller.pause("F8 紧急暂停")
 
     assert snapshots == [ready]
     assert engine.calls[-1] == ("pause", "F8 紧急暂停")
+
+
+def test_completed_snapshot_unlocks_ui_only_after_worker_exits(root) -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    window = MainWindow(root, controller, FakeSettings())
+    ready = RuntimeSnapshot(FishingState.READY, 0, 2, 30.0)
+    completed = RuntimeSnapshot(FishingState.COMPLETE, 2, 2, 30.0)
+
+    window.on_bind()
+    for _ in range(3):
+        scheduler.run_next(1000)
+
+    engine.running = True
+    engine.publish(ready)
+    scheduler.run_next(10)
+    root.update()
+    assert window.start_button.instate(["disabled"])
+
+    engine.publish(completed)
+    root.update()
+    assert window.start_button.instate(["disabled"])
+    assert scheduler.pending
+    scheduler.run_next(10)
+    assert window.start_button.instate(["disabled"])
+
+    engine.running = False
+    scheduler.run_next(10)
+    root.update()
+    assert not window.start_button.instate(["disabled"])
 
 
 class AppWindowService:
@@ -313,9 +733,14 @@ class AppRoot:
         self.events = events
         self.destroyed = False
         self.on_mainloop = lambda: None
+        self.after_callbacks: list[object] = []
 
     def after(self, _delay: int, callback) -> None:
-        callback()
+        self.after_callbacks.append(callback)
+
+    def run_next_after(self) -> None:
+        callback = self.after_callbacks.pop(0)
+        callback()  # type: ignore[operator]
 
     def update_idletasks(self) -> None:
         self.events.append("update")
@@ -431,10 +856,12 @@ def test_application_routes_a_registered_f8_press_through_controller() -> None:
         diagnostics=AppDiagnostics(events),
         settings=FakeSettings(),
     )
-    root.on_mainloop = lambda: (
-        engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0)),
-        hotkey.trigger(),
-    )
+    def exercise_f8() -> None:
+        engine.publish(RuntimeSnapshot(FishingState.READY, 0, 2, 30.0))
+        root.run_next_after()
+        hotkey.trigger()
+
+    root.on_mainloop = exercise_f8
 
     Application(
         services=services,
@@ -449,3 +876,39 @@ def test_application_routes_a_registered_f8_press_through_controller() -> None:
         isinstance(event, tuple) and event[0] == "block_start"
         for event in events
     )
+
+
+def test_importing_app_does_not_create_tk_or_load_platform_dependencies() -> None:
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    script = f"""
+import sys
+import tkinter
+
+sys.path.insert(0, {str(source_root)!r})
+tk_calls = []
+
+def forbidden_tk():
+    tk_calls.append(True)
+    raise AssertionError("Tk must not be created during import")
+
+tkinter.Tk = forbidden_tk
+before = set(sys.modules)
+import auto_fishing.app
+loaded = set(sys.modules) - before
+assert not tk_calls
+assert "dxcam" not in loaded
+assert not any(name.startswith("auto_fishing.capture") for name in loaded)
+assert not any(name.startswith("auto_fishing.platform") for name in loaded)
+assert "auto_fishing.automation.engine" not in loaded
+print("APP_IMPORT_SAFE")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "APP_IMPORT_SAFE"

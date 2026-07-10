@@ -19,12 +19,13 @@ class MainWindow:
         self._closed = False
         self._countdown_active = False
         self._runtime_active = False
+        self._has_binding = False
         self._start_block_reason = ""
         self._state = FishingState.UNBOUND
 
         root.title("异环自动钓鱼")
         root.geometry(
-            f"320x240+{self.settings.window_x}+{self.settings.window_y}"
+            f"320x240{self.settings.window_x:+d}{self.settings.window_y:+d}"
         )
         root.minsize(320, 240)
         root.attributes("-topmost", True)
@@ -45,6 +46,7 @@ class MainWindow:
         self._build_widgets()
         root.protocol("WM_DELETE_WINDOW", self.close)
         controller.subscribe(self._queue_snapshot)
+        self._refresh_control_states()
 
     def _build_widgets(self) -> None:
         content = ttk.Frame(self.root, padding=(10, 7))
@@ -139,9 +141,13 @@ class MainWindow:
     def _on_bind_done(self, title: str | None, error: str | None) -> None:
         self._countdown_active = False
         if error:
-            self.binding_var.set("未绑定")
+            self._has_binding = bool(title)
+            self.binding_var.set(
+                f"绑定失败，仍绑定：{title}" if title else "未绑定"
+            )
             self.error_var.set(error)
         elif title:
+            self._has_binding = True
             self.binding_var.set(f"已绑定：{title}")
             self.error_var.set("无")
         self._refresh_control_states()
@@ -149,6 +155,7 @@ class MainWindow:
     def on_start(self) -> None:
         if (
             self._start_block_reason
+            or not self._has_binding
             or self._runtime_active
             or self._countdown_active
         ):
@@ -220,6 +227,7 @@ class MainWindow:
                     self._runtime_active
                     or self._countdown_active
                     or self._start_block_reason
+                    or not self._has_binding
                 )
                 else "normal"
             )

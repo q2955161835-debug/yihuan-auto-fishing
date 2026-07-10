@@ -4,21 +4,13 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, SimpleQueue
+import threading
 import tkinter
 from typing import Any
 
-from auto_fishing.automation.engine import AutomationCore, AutomationEngine
-from auto_fishing.automation.state_machine import FishingStateMachine
-from auto_fishing.capture.dxcam_source import DxcamFrameSource
 from auto_fishing.model import FishingState, RuntimeSnapshot
-from auto_fishing.platform.hotkey import GlobalHotkey
-from auto_fishing.platform.input import SafeInput, Win32InputBackend
-from auto_fishing.platform.windowing import WindowService
-from auto_fishing.storage.diagnostics import DiagnosticsStore
-from auto_fishing.storage.settings import SettingsStore
 from auto_fishing.ui.main_window import MainWindow
-from auto_fishing.vision.progress import ProgressController
-from auto_fishing.vision.scenes import SceneRecognizer
 
 
 BindTick = Callable[[int], None]
@@ -45,15 +37,72 @@ class AppController:
         self._state = FishingState.UNBOUND
         self._callbacks: list[Callable[[RuntimeSnapshot], None]] = []
         self._engine_subscribed = False
+        self._snapshot_generation = 0
+        self._last_bound_title: str | None = None
+        self._command_condition = threading.Condition(threading.RLock())
+        self._active_commands = 0
+        self._snapshot_queue: SimpleQueue[RuntimeSnapshot] = SimpleQueue()
+        self._snapshot_poll_started = False
+        self._pending_complete: tuple[RuntimeSnapshot, int] | None = None
 
     def subscribe(self, callback: Callable[[RuntimeSnapshot], None]) -> None:
         self._callbacks.append(callback)
         if not self._engine_subscribed:
             self._engine_subscribed = True
-            self.engine.subscribe(self._publish_snapshot)
+            self.engine.subscribe(self._enqueue_snapshot)
+        if not self._snapshot_poll_started:
+            self._snapshot_poll_started = True
+            self.schedule(10, self._drain_snapshots)
 
-    def _publish_snapshot(self, snapshot: RuntimeSnapshot) -> None:
-        self._state = snapshot.state
+    def _enqueue_snapshot(self, snapshot: RuntimeSnapshot) -> None:
+        with self._command_condition:
+            if self._closed:
+                return
+            self._state = snapshot.state
+            self._snapshot_queue.put(snapshot)
+
+    def _drain_snapshots(self) -> None:
+        with self._command_condition:
+            if self._closed:
+                return
+
+        while True:
+            try:
+                snapshot = self._snapshot_queue.get_nowait()
+            except Empty:
+                break
+            self._accept_snapshot(snapshot)
+
+        self._deliver_completed_if_stopped()
+        with self._command_condition:
+            if self._closed:
+                return
+        self.schedule(10, self._drain_snapshots)
+
+    def _accept_snapshot(self, snapshot: RuntimeSnapshot) -> None:
+        with self._command_condition:
+            if self._closed:
+                return
+            self._snapshot_generation += 1
+            generation = self._snapshot_generation
+            if snapshot.state is FishingState.COMPLETE:
+                self._pending_complete = (snapshot, generation)
+                return
+            self._pending_complete = None
+        self._deliver_snapshot(snapshot)
+
+    def _deliver_completed_if_stopped(self) -> None:
+        with self._command_condition:
+            pending = self._pending_complete
+            if self._closed or pending is None or self.engine.is_running:
+                return
+            snapshot, generation = pending
+            if generation != self._snapshot_generation:
+                return
+            self._pending_complete = None
+        self._deliver_snapshot(snapshot)
+
+    def _deliver_snapshot(self, snapshot: RuntimeSnapshot) -> None:
         for callback in tuple(self._callbacks):
             callback(snapshot)
 
@@ -72,65 +121,114 @@ class AppController:
         on_tick: BindTick,
         on_done: BindDone,
     ) -> None:
-        if self._closed:
-            on_done(None, "程序正在关闭")
-            return
-        if self._binding:
-            on_done(None, "绑定倒计时正在进行")
-            return
-        self._binding = True
-        self._countdown_generation += 1
-        generation = self._countdown_generation
+        with self._command_condition:
+            if self._closed:
+                return
+            if self._binding:
+                on_done(None, "绑定倒计时正在进行")
+                return
+            self._binding = True
+            self._countdown_generation += 1
+            generation = self._countdown_generation
 
         def advance(seconds: int) -> None:
-            if self._closed or generation != self._countdown_generation:
-                return
-            if seconds > 0:
-                on_tick(seconds)
-                self.schedule(1000, lambda: advance(seconds - 1))
-                return
+            with self._command_condition:
+                if self._closed or generation != self._countdown_generation:
+                    return
+                if seconds > 0:
+                    on_tick(seconds)
+                    self.schedule(1000, lambda: advance(seconds - 1))
+                    return
+                self._active_commands += 1
+
+            title: str | None = None
+            error_message: str | None = None
             try:
                 bound = self.window_service.bind_foreground()
                 self.engine.bind(bound)
             except Exception as error:
-                on_done(None, str(error))
+                with self._command_condition:
+                    title = self._last_bound_title
+                error_message = str(error)
             else:
-                on_done(bound.title, None)
+                title = bound.title
+                with self._command_condition:
+                    self._last_bound_title = title
             finally:
-                self._binding = False
+                self._finish_command()
+                with self._command_condition:
+                    self._binding = False
+            on_done(title, error_message)
 
         try:
             advance(3)
         except BaseException:
-            self._binding = False
-            self._countdown_generation += 1
+            with self._command_condition:
+                self._binding = False
+                self._countdown_generation += 1
             raise
 
     def start(self, target: int) -> None:
-        self._starting = True
+        with self._command_condition:
+            if self._closed:
+                return
+            self._starting = True
+            self._active_commands += 1
         try:
             self.engine.start(target)
         finally:
-            self._starting = False
+            with self._command_condition:
+                self._starting = False
+            self._finish_command()
 
     def pause(self, reason: str = "按钮暂停") -> None:
-        if (
-            reason.strip().upper().startswith("F8")
-            and not self._starting
-            and self._state in {FishingState.UNBOUND, FishingState.COMPLETE}
-        ):
-            return
-        self.engine.pause(reason)
+        with self._command_condition:
+            if self._closed:
+                return
+            if (
+                reason.strip().upper().startswith("F8")
+                and not self._starting
+                and self._state in {FishingState.UNBOUND, FishingState.COMPLETE}
+            ):
+                return
+            self._active_commands += 1
+        try:
+            self.engine.pause(reason)
+        finally:
+            self._finish_command()
 
     def resume(self) -> None:
-        self.engine.resume()
+        if not self._begin_command():
+            return
+        try:
+            self.engine.resume()
+        finally:
+            self._finish_command()
+
+    def _begin_command(self) -> bool:
+        with self._command_condition:
+            if self._closed:
+                return False
+            self._active_commands += 1
+            return True
+
+    def _finish_command(self) -> None:
+        with self._command_condition:
+            self._active_commands -= 1
+            if self._active_commands == 0:
+                self._command_condition.notify_all()
 
     def shutdown(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._binding = False
-        self._countdown_generation += 1
+        with self._command_condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._binding = False
+            self._countdown_generation += 1
+            self._snapshot_generation += 1
+            self._pending_complete = None
+            while self._active_commands:
+                self._command_condition.wait()
         self.engine.shutdown()
 
 
@@ -208,6 +306,17 @@ class Application:
 
     @staticmethod
     def _build_services(data_dir: Path) -> ApplicationServices:
+        from auto_fishing.automation.engine import AutomationCore, AutomationEngine
+        from auto_fishing.automation.state_machine import FishingStateMachine
+        from auto_fishing.capture.dxcam_source import DxcamFrameSource
+        from auto_fishing.platform.hotkey import GlobalHotkey
+        from auto_fishing.platform.input import SafeInput, Win32InputBackend
+        from auto_fishing.platform.windowing import WindowService
+        from auto_fishing.storage.diagnostics import DiagnosticsStore
+        from auto_fishing.storage.settings import SettingsStore
+        from auto_fishing.vision.progress import ProgressController
+        from auto_fishing.vision.scenes import SceneRecognizer
+
         window_service = WindowService()
         safe_input = SafeInput(Win32InputBackend())
         scene_recognizer = SceneRecognizer()
