@@ -144,6 +144,31 @@ class ActivatingWindowService(RecordingWindowService):
         return self.foreground
 
 
+class BlockingWindowError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("迟到的窗口错误")
+        self.stringify_entered = threading.Event()
+        self.allow_stringify = threading.Event()
+
+    def __str__(self) -> str:
+        self.stringify_entered.set()
+        assert self.allow_stringify.wait(timeout=1)
+        return super().__str__()
+
+
+class LateErrorWindowService(RecordingWindowService):
+    def __init__(self, error: BlockingWindowError) -> None:
+        super().__init__()
+        self.error = error
+        self.raise_worker_error = False
+
+    def is_foreground(self, bound: BoundWindow) -> bool:
+        if self.raise_worker_error:
+            self.raise_worker_error = False
+            raise self.error
+        return super().is_foreground(bound)
+
+
 class FreshFrameSource:
     def __init__(self, frame: np.ndarray | None = None) -> None:
         self.frame = (
@@ -542,6 +567,52 @@ def test_core_requires_two_result_candidates_before_leaving_control() -> None:
 
     assert core.snapshot.state is FishingState.WAIT_RESULT
     assert not any(isinstance(event, tuple) for event in input_service.events)
+
+
+def test_result_candidates_on_sixth_and_seventh_missing_frames_win_over_loss() -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    for index in range(5):
+        core.process(SceneObservation(), None, index / 30, CLIENT)
+
+    core.process(
+        SceneObservation(result_candidate=True),
+        None,
+        5 / 30,
+        CLIENT,
+    )
+    assert core.snapshot.state is FishingState.CONTROL
+
+    core.process(
+        SceneObservation(result_candidate=True),
+        None,
+        6 / 30,
+        CLIENT,
+    )
+
+    assert core.snapshot.state is FishingState.WAIT_RESULT
+
+
+def test_single_sixth_frame_candidate_then_interruption_is_progress_loss() -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    for index in range(5):
+        core.process(SceneObservation(), None, index / 30, CLIENT)
+
+    core.process(
+        SceneObservation(result_candidate=True),
+        None,
+        5 / 30,
+        CLIENT,
+    )
+    assert core.snapshot.state is FishingState.CONTROL
+
+    core.process(SceneObservation(), None, 6 / 30, CLIENT)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_PROGRESS_LOST"
 
 
 def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
@@ -1061,6 +1132,38 @@ def test_resume_activates_game_and_keeps_request_until_third_stable_frame(
         assert engine._resume_request is None
         assert input_service.events.count("F") == 2
     finally:
+        engine.shutdown()
+
+
+def test_late_window_error_cannot_invalidate_new_resume_request(tmp_path) -> None:
+    error = BlockingWindowError()
+    window_service = LateErrorWindowService(error)
+    recognizer = OrderedResumeRecognizer([])
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+        window_service=window_service,
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    window_service.raise_worker_error = True
+    assert error.stringify_entered.wait(timeout=1)
+
+    engine.pause("用户暂停")
+    recognizer.resume_mode = True
+    engine.resume()
+    resume_epoch = engine._pause_epoch
+    assert engine._resume_request == resume_epoch
+    error.allow_stringify.set()
+
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+        assert engine._pause_epoch == resume_epoch
+        assert engine._resume_request is None
+        assert recognizer.resume_frames >= 3
+        assert input_service.events.count("F") == 2
+    finally:
+        error.allow_stringify.set()
         engine.shutdown()
 
 

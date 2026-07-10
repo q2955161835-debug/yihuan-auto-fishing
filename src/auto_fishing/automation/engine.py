@@ -275,8 +275,9 @@ class AutomationCore:
             else 0
         )
         self._input(self.input_service.release_all)
-        if self.result_candidate_frames >= 2:
-            self.state_machine.handle(Event.BAR_GONE, now)
+        if observation.result_candidate:
+            if self.result_candidate_frames >= 2:
+                self.state_machine.handle(Event.BAR_GONE, now)
             return
         if self.bar_missing_frames >= 6:
             self.pause(
@@ -692,6 +693,10 @@ class AutomationEngine:
                 return
 
             while not self._stop_requested():
+                paused_without_request, _, _ = self._read_pause_gate()
+                if paused_without_request:
+                    self._shutdown_event.wait(0.005)
+                    continue
                 try:
                     packet = self.frame_source.latest()
                 except Exception as error:
@@ -701,6 +706,14 @@ class AutomationEngine:
                     break
                 if self._stop_requested():
                     break
+                (
+                    paused_without_request,
+                    resume_token,
+                    frame_epoch,
+                ) = self._read_pause_gate()
+                if paused_without_request:
+                    self._shutdown_event.wait(0.005)
+                    continue
                 now = self.clock()
                 self._last_frame = packet.frame
 
@@ -709,6 +722,7 @@ class AutomationEngine:
                         "E_STALE_FRAME",
                         "截图帧超过 0.5 秒未更新",
                         packet.frame,
+                        expected_epoch=frame_epoch,
                     )
                     self._shutdown_event.wait(0.005)
                     continue
@@ -725,25 +739,24 @@ class AutomationEngine:
                         self._refresh_and_validate_window(bound, now)
                     )
                 except CaptureActionError as error:
-                    self._pause("E_CAPTURE", str(error), packet.frame)
+                    self._pause(
+                        "E_CAPTURE",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
                     self._shutdown_event.wait(0.005)
                     continue
                 except Exception as error:
-                    self._pause("E_WINDOW", str(error), packet.frame)
+                    self._pause(
+                        "E_WINDOW",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
                     self._shutdown_event.wait(0.005)
                     continue
                 if capture_restarted:
-                    continue
-
-                with self._pause_lock:
-                    resume_token = (
-                        None if self._closing else self._resume_request
-                    )
-                if (
-                    self.core.snapshot.state is FishingState.PAUSED
-                    and resume_token is None
-                ):
-                    self._shutdown_event.wait(0.005)
                     continue
 
                 try:
@@ -752,7 +765,12 @@ class AutomationEngine:
                         client_frame, packet.timestamp
                     )
                 except Exception as error:
-                    self._pause("E_VISION", str(error), packet.frame)
+                    self._pause(
+                        "E_VISION",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
                     self._shutdown_event.wait(0.005)
                     continue
 
@@ -802,13 +820,28 @@ class AutomationEngine:
                         bound.client_rect,
                     )
                 except InputActionError as error:
-                    self._pause("E_INPUT", str(error), packet.frame)
+                    self._pause(
+                        "E_INPUT",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
                     continue
                 except VisionActionError as error:
-                    self._pause("E_VISION", str(error), packet.frame)
+                    self._pause(
+                        "E_VISION",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
                     continue
                 except WindowActionError as error:
-                    self._pause("E_WINDOW", str(error), packet.frame)
+                    self._pause(
+                        "E_WINDOW",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
                     continue
 
                 if snapshot.state is FishingState.COMPLETE:
@@ -860,8 +893,14 @@ class AutomationEngine:
         *,
         save_diagnostic: bool = True,
         replace_existing: bool = False,
-    ) -> None:
+        expected_epoch: int | None = None,
+    ) -> bool:
         with self._pause_lock:
+            if (
+                expected_epoch is not None
+                and expected_epoch != self._pause_epoch
+            ):
+                return False
             self._pause_epoch += 1
             self._resume_request = None
             pause_epoch = self._pause_epoch
@@ -896,6 +935,7 @@ class AutomationEngine:
             except Exception as error:
                 self.logger.warning("保存诊断失败: %s", error)
         self._publish()
+        return True
 
     def _compensate_cancelled_start(self) -> None:
         while True:
@@ -949,6 +989,16 @@ class AutomationEngine:
 
     def _stop_requested(self) -> bool:
         return self._shutdown_event.is_set() or self._cancel_event.is_set()
+
+    def _read_pause_gate(self) -> tuple[bool, int | None, int]:
+        with self._pause_lock:
+            resume_token = None if self._closing else self._resume_request
+            paused = self.core.snapshot.state is FishingState.PAUSED
+            return (
+                paused and resume_token is None,
+                resume_token,
+                self._pause_epoch,
+            )
 
     def _publish(self) -> None:
         snapshot = self.core.snapshot
