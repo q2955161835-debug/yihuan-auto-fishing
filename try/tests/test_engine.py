@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import json
 from collections.abc import Callable
 
 import numpy as np
@@ -54,15 +55,27 @@ class RecordingInput:
 
 
 class ReleaseFailingInput(RecordingInput):
-    def __init__(self) -> None:
+    def __init__(self, *, fail_release: bool = True) -> None:
         super().__init__()
-        self.fail_release = True
+        self.fail_release = fail_release
 
     def release_all(self) -> None:
         if self.fail_release:
             self.fail_release = False
             raise InputFailure("key release failed")
         super().release_all()
+
+
+class BarrierInput(RecordingInput):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tap_entered = threading.Event()
+        self.allow_tap = threading.Event()
+
+    def tap_f(self) -> None:
+        self.tap_entered.set()
+        assert self.allow_tap.wait(timeout=1)
+        super().tap_f()
 
 
 class RecordingWindowService:
@@ -118,9 +131,14 @@ class FixedFrameSource(FreshFrameSource):
 
 
 class DelayedFrameSource(FreshFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.returned = threading.Event()
+
     def latest(self) -> FramePacket:
         timestamp = time.monotonic()
         time.sleep(0.25)
+        self.returned.set()
         return FramePacket(self.frame, timestamp, 30.0)
 
 
@@ -140,6 +158,64 @@ class BlockingFrameSource(FreshFrameSource):
         super().stop()
         if self.unblock_on_stop:
             self.unblock.set()
+
+
+class BlockingStopFrameSource(FreshFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop_entered = threading.Event()
+        self.allow_stop = threading.Event()
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        self.stop_entered.set()
+        self.allow_stop.wait(timeout=5)
+
+
+class StartStopRaceFrameSource(FreshFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = threading.Event()
+        self.allow_start = threading.Event()
+        self.stop_entered = threading.Event()
+        self.active = False
+
+    def start(self, device_index: int, output_index: int) -> None:
+        self.started.append((device_index, output_index))
+        self.start_entered.set()
+        assert self.allow_start.wait(timeout=1)
+        self.active = True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        self.stop_entered.set()
+        self.active = False
+
+
+class SwitchingFrameSource(FreshFrameSource):
+    def __init__(self, *, fail_restart: bool = False) -> None:
+        super().__init__()
+        self.fail_restart = fail_restart
+        self.restart_entered = threading.Event()
+        self.allow_restart = threading.Event()
+        self.new_latest_entered = threading.Event()
+        self.allow_new_frame = threading.Event()
+        self.latest_calls = 0
+
+    def start(self, device_index: int, output_index: int) -> None:
+        self.started.append((device_index, output_index))
+        if len(self.started) > 1:
+            self.restart_entered.set()
+            if self.fail_restart:
+                raise RuntimeError("restart capture failed")
+            assert self.allow_restart.wait(timeout=1)
+
+    def latest(self) -> FramePacket:
+        self.latest_calls += 1
+        if self.latest_calls > 1:
+            self.new_latest_entered.set()
+            assert self.allow_new_frame.wait(timeout=1)
+        return super().latest()
 
 
 class ScriptedRecognizer:
@@ -164,6 +240,36 @@ class ScriptedRecognizer:
         if self.observations:
             return self.observations.pop(0)
         return SceneObservation()
+
+
+class BarrierRecognizer(ScriptedRecognizer):
+    def __init__(self, observations: list[SceneObservation]) -> None:
+        super().__init__(observations)
+        self.block = False
+        self.entered = threading.Event()
+        self.allow = threading.Event()
+        self.returned = threading.Event()
+
+    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+        if self.block:
+            self.entered.set()
+            assert self.allow.wait(timeout=1)
+        result = super().observe(frame, timestamp)
+        self.returned.set()
+        return result
+
+
+class CapturedBarrierRecognizer(ScriptedRecognizer):
+    def __init__(self, observations: list[SceneObservation]) -> None:
+        super().__init__(observations)
+        self.entered = threading.Event()
+        self.allow = threading.Event()
+
+    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+        result = super().observe(frame, timestamp)
+        self.entered.set()
+        assert self.allow.wait(timeout=1)
+        return result
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
@@ -294,12 +400,68 @@ def test_core_stale_frame_releases_after_point_two_and_pauses_after_point_five()
     )
     assert core.snapshot.state is FishingState.CONTROL
     assert input_service.events[-1] == "release"
+    assert core.bar_missing_frames == 0
 
     core.process(
         SceneObservation(), FramePacket(frame, 1.0, 30.0), 1.6, None
     )
     assert core.snapshot.state is FishingState.PAUSED
     assert input_service.events[-1] == "release"
+
+
+def test_core_old_ready_frame_releases_without_casting_or_advancing() -> None:
+    core, input_service, _state_machine = make_core()
+    core.start(1, 0.0)
+
+    core.process(
+        SceneObservation(),
+        FramePacket(np.zeros((10, 10, 3), dtype=np.uint8), 1.0, 30.0),
+        1.3,
+        CLIENT,
+    )
+
+    assert input_service.events == ["release"]
+    assert core.snapshot.state is FishingState.READY
+
+
+def test_pause_serializes_with_inflight_process_and_finishes_with_release() -> None:
+    input_service = BarrierInput()
+    state_machine = FishingStateMachine()
+    core = AutomationCore(
+        state_machine=state_machine,
+        controller=ProgressController(),
+        input_service=input_service,
+        scene_recognizer=SceneRecognizer(),
+        activate_game=lambda: True,
+    )
+    core.start(1, 0.0)
+    process_errors: list[BaseException] = []
+    pause_returned = threading.Event()
+
+    def process_frame() -> None:
+        try:
+            core.process(SceneObservation(), None, 0.1, CLIENT)
+        except BaseException as error:
+            process_errors.append(error)
+
+    process_thread = threading.Thread(target=process_frame)
+    process_thread.start()
+    assert input_service.tap_entered.wait(timeout=1)
+    pause_thread = threading.Thread(
+        target=lambda: (core.pause("race pause", 0.2), pause_returned.set())
+    )
+    pause_thread.start()
+    assert pause_returned.wait(timeout=0.05) is False
+
+    input_service.allow_tap.set()
+    process_thread.join(timeout=1)
+    pause_thread.join(timeout=1)
+    core.process(SceneObservation(bite=True), None, 0.3, CLIENT)
+
+    assert process_errors == []
+    assert pause_returned.is_set()
+    assert core.snapshot.state is FishingState.PAUSED
+    assert input_service.events == ["F", "release"]
 
 
 def test_core_timeout_and_resume_classify_current_scene() -> None:
@@ -380,14 +542,19 @@ def test_engine_pauses_stale_frame_and_user_pause_paths(tmp_path) -> None:
 
 
 def test_frame_age_is_measured_after_latest_frame_returns(tmp_path) -> None:
+    source = DelayedFrameSource()
+    recognizer = ScriptedRecognizer()
     engine, core, input_service, _window, _source = make_engine(
-        tmp_path, frame_source=DelayedFrameSource()
+        tmp_path, frame_source=source, recognizer=recognizer
     )
     engine.start(1)
-    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
-    engine.shutdown()
+    assert source.returned.wait(timeout=1)
+    wait_until(lambda: "release" in input_service.events)
 
-    assert input_service.events[0] == "release"
+    assert "F" not in input_service.events
+    assert recognizer.frames == []
+    assert core.snapshot.state is FishingState.READY
+    engine.shutdown()
 
 
 def test_engine_classifies_release_failure_as_input_error(tmp_path) -> None:
@@ -413,6 +580,58 @@ def test_engine_classifies_release_failure_as_input_error(tmp_path) -> None:
 
     assert core.pause_code == "E_INPUT"
     assert input_service.events[-1] == "release"
+
+
+@pytest.mark.parametrize("failure_kind", ["window", "vision", "stale"])
+def test_engine_safety_release_failure_overrides_cause_with_input_error(
+    tmp_path, failure_kind: str
+) -> None:
+    input_service = ReleaseFailingInput()
+    window_service = RecordingWindowService()
+    recognizer = ScriptedRecognizer()
+    source: FreshFrameSource = FreshFrameSource()
+    if failure_kind == "window":
+        window_service.foreground = False
+    elif failure_kind == "vision":
+        recognizer.error = RuntimeError("vision root cause")
+    else:
+        source = FixedFrameSource(time.monotonic() - 0.6)
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path,
+        frame_source=source,
+        recognizer=recognizer,
+        window_service=window_service,
+        input_service=input_service,
+    )
+
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+    engine.shutdown()
+
+    metadata = json.loads(next((tmp_path / "diagnostics").glob("*.json")).read_text("utf-8"))
+    assert core.pause_code == "E_INPUT"
+    assert "key release failed" in core.snapshot.error
+    assert metadata["code"] == "E_INPUT"
+    assert "key release failed" in metadata["detail"]
+
+
+def test_core_timeout_release_failure_still_pauses_as_input_error() -> None:
+    input_service = ReleaseFailingInput()
+    state_machine = FishingStateMachine()
+    core = AutomationCore(
+        state_machine=state_machine,
+        controller=ProgressController(),
+        input_service=input_service,
+        scene_recognizer=SceneRecognizer(),
+        activate_game=lambda: True,
+    )
+    core.start(1, 0.0)
+
+    core.process(SceneObservation(), None, 3.1, CLIENT)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_INPUT"
+    assert "key release failed" in core.snapshot.error
 
 
 def test_engine_refreshes_client_rect_and_crops_monitor_frame(tmp_path) -> None:
@@ -441,6 +660,48 @@ def test_engine_refreshes_client_rect_and_crops_monitor_frame(tmp_path) -> None:
     assert any(frame.shape[:2] == (540, 960) for frame in recognizer.frames)
 
 
+def test_output_restart_discards_packet_from_previous_capture_source(tmp_path) -> None:
+    source = SwitchingFrameSource()
+    window_service = RecordingWindowService()
+    window_service.refreshed = BoundWindow(
+        100, "异环", CLIENT, MONITOR, 1, 0
+    )
+    recognizer = ScriptedRecognizer()
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        frame_source=source,
+        recognizer=recognizer,
+        window_service=window_service,
+    )
+    engine.start(1)
+    assert source.restart_entered.wait(timeout=1)
+    source.allow_restart.set()
+    assert source.new_latest_entered.wait(timeout=1)
+
+    assert recognizer.observed.is_set() is False
+    assert "F" not in input_service.events
+
+    source.allow_new_frame.set()
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.shutdown()
+
+
+def test_output_restart_failure_is_capture_error(tmp_path) -> None:
+    source = SwitchingFrameSource(fail_restart=True)
+    window_service = RecordingWindowService()
+    window_service.refreshed = BoundWindow(
+        100, "异环", CLIENT, MONITOR, 1, 0
+    )
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path, frame_source=source, window_service=window_service
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+    engine.shutdown()
+
+    assert core.pause_code == "E_CAPTURE"
+
+
 def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> None:
     recognizer = ScriptedRecognizer([SceneObservation()])
     engine, core, input_service, _window, _source = make_engine(
@@ -453,11 +714,42 @@ def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> No
         [SceneObservation(result=True), SceneObservation(result=True)]
     )
     engine.resume()
-    wait_until(lambda: core.snapshot.state is FishingState.DISMISS_RESULT)
-    engine.shutdown()
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.DISMISS_RESULT)
+    except AssertionError as error:
+        raise AssertionError(
+            f"snapshot={core.snapshot!r}, events={input_service.events!r}, "
+            f"remaining={recognizer.observations!r}, "
+            f"resume_requested={engine._resume_requested.is_set()}, "
+            f"running={engine.is_running}"
+        ) from error
 
     assert core.snapshot.state is FishingState.DISMISS_RESULT
     assert not any(isinstance(event, tuple) for event in input_service.events)
+    engine.shutdown()
+
+
+def test_resume_does_not_consume_observation_captured_before_request(tmp_path) -> None:
+    recognizer = CapturedBarrierRecognizer(
+        [
+            SceneObservation(),
+            SceneObservation(result=True),
+            SceneObservation(result=True),
+        ]
+    )
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path, recognizer=recognizer
+    )
+    engine.start(1)
+    assert recognizer.entered.wait(timeout=1)
+
+    engine.pause("pause during recognition")
+    engine.resume()
+    recognizer.allow.set()
+    wait_until(lambda: core.snapshot.state is FishingState.DISMISS_RESULT)
+
+    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    engine.shutdown()
 
 
 def test_successful_resume_starts_a_new_single_diagnostic_incident(tmp_path) -> None:
@@ -479,6 +771,31 @@ def test_successful_resume_starts_a_new_single_diagnostic_incident(tmp_path) -> 
     engine.shutdown()
 
     assert len(list((tmp_path / "diagnostics").glob("*.json"))) == 2
+
+
+def test_pause_cancels_inflight_resume_request_before_returning(tmp_path) -> None:
+    recognizer = BarrierRecognizer([SceneObservation()])
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path, recognizer=recognizer
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.pause("first pause")
+    recognizer.observations.append(SceneObservation(ready=True))
+    recognizer.block = True
+
+    engine.resume()
+    assert recognizer.entered.wait(timeout=1)
+    engine.pause("second pause")
+    event_count = len(input_service.events)
+    recognizer.allow.set()
+    assert recognizer.returned.wait(timeout=1)
+    time.sleep(0.02)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert input_service.events[-1] == "release"
+    assert len(input_service.events) == event_count
+    engine.shutdown()
 
 
 def test_unexpected_core_failure_still_blocks_and_releases_input(tmp_path) -> None:
@@ -526,6 +843,61 @@ def test_shutdown_is_idempotent_and_unblocks_worker_within_two_seconds(tmp_path)
     assert engine.is_running is False
     assert source.stop_calls >= 1
     assert input_service.events[-1] == "release"
+
+
+def test_shutdown_total_budget_includes_blocking_stop_and_is_reused(tmp_path) -> None:
+    source = BlockingStopFrameSource()
+    engine, _core, _input, _window, _source = make_engine(
+        tmp_path, frame_source=source
+    )
+    engine.start(1)
+    wait_until(lambda: engine.is_running)
+
+    started = time.monotonic()
+    engine.shutdown()
+    first_elapsed = time.monotonic() - started
+    repeated = time.monotonic()
+    engine.shutdown()
+    repeated_elapsed = time.monotonic() - repeated
+    source.allow_stop.set()
+
+    assert source.stop_entered.is_set()
+    assert first_elapsed < 2.2
+    assert repeated_elapsed < 0.1
+
+
+def test_shutdown_cannot_stop_before_inflight_capture_start_finishes(tmp_path) -> None:
+    source = StartStopRaceFrameSource()
+    engine, _core, _input, _window, _source = make_engine(
+        tmp_path, frame_source=source
+    )
+    engine.start(1)
+    assert source.start_entered.wait(timeout=1)
+    shutdown_thread = threading.Thread(target=engine.shutdown)
+    shutdown_thread.start()
+    source.stop_entered.wait(timeout=0.1)
+    source.allow_start.set()
+    shutdown_thread.join(timeout=2.2)
+    assert source.stop_entered.wait(timeout=1)
+    wait_until(lambda: engine.is_running is False)
+
+    assert source.active is False
+
+
+def test_shutdown_release_failure_finishes_paused_with_input_error(tmp_path) -> None:
+    input_service = ReleaseFailingInput(fail_release=False)
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path, input_service=input_service
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    input_service.fail_release = True
+
+    engine.shutdown()
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_INPUT"
+    assert "key release failed" in core.snapshot.error
 
 
 def test_shutdown_does_not_block_past_two_seconds_for_stuck_worker(tmp_path) -> None:

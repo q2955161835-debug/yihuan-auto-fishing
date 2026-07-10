@@ -34,6 +34,10 @@ class WindowActionError(RuntimeError):
     """The bound game window cannot safely receive input."""
 
 
+class CaptureActionError(RuntimeError):
+    """The capture source failed while changing outputs."""
+
+
 class AutomationCore:
     """Thread-independent fishing decisions built on the formal state machine."""
 
@@ -56,67 +60,93 @@ class AutomationCore:
         self.pause_code = ""
         self._error = ""
         self._fps = 0.0
+        self._lock = threading.RLock()
         self._input_blocked = threading.Event()
         self._input_blocked.set()
 
     @property
     def snapshot(self) -> RuntimeSnapshot:
-        return self.state_machine.snapshot(self._fps, self._error)
+        with self._lock:
+            return self.state_machine.snapshot(self._fps, self._error)
 
     @property
     def input_blocked(self) -> bool:
-        return self._input_blocked.is_set()
+        with self._lock:
+            return self._input_blocked.is_set()
 
     def start(self, target: int, now: float) -> None:
-        self.state_machine.start(target, now)
-        self.bar_missing_frames = 0
-        self.result_candidate_frames = 0
-        self.pause_code = ""
-        self._error = ""
-        self._fps = 0.0
-        self._input_blocked.clear()
+        with self._lock:
+            self.state_machine.start(target, now)
+            self.bar_missing_frames = 0
+            self.result_candidate_frames = 0
+            self.pause_code = ""
+            self._error = ""
+            self._fps = 0.0
+            self._input_blocked.clear()
 
     def block_input(self) -> None:
         """Prevent subsequent decisions from creating new input actions."""
-        self._input_blocked.set()
+        with self._lock:
+            self._input_blocked.set()
 
     def release_inputs(self) -> None:
-        """Best-effort release used by every safety and shutdown path."""
-        try:
-            self.input_service.release_all()
-        except Exception:
-            # A failed release must not prevent the state from becoming paused.
-            return
+        """Release held input, surfacing failure through the input boundary."""
+        with self._lock:
+            try:
+                self.input_service.release_all()
+            except Exception as error:
+                raise InputActionError(str(error)) from error
 
     def pause(self, reason: str, now: float, *, code: str = "E_USER_PAUSE") -> None:
-        self.block_input()
-        self.release_inputs()
-        self.state_machine.pause(reason, now)
-        self.pause_code = code
-        self._error = reason
+        with self._lock:
+            was_paused = self.state_machine.state is FishingState.PAUSED
+            final_reason = self._error if was_paused else reason
+            final_code = self.pause_code if was_paused else code
+            self._input_blocked.set()
+            try:
+                self.input_service.release_all()
+            except Exception as error:
+                final_code = "E_INPUT"
+                final_reason = (
+                    f"{final_reason}; release_all failed: {error}"
+                )
+            self.state_machine.pause(final_reason, now)
+            self.pause_code = final_code
+            self._error = final_reason
 
     def resume(self, observation: SceneObservation, now: float) -> bool:
-        if self.state_machine.state is not FishingState.PAUSED:
-            return False
-        event = None
-        if observation.progress is not None:
-            event = Event.RESUME_CONTROL
-        elif observation.result:
-            event = Event.RESUME_RESULT
-        elif observation.ready:
-            event = Event.RESUME_READY
-        if event is None:
-            return False
+        with self._lock:
+            if self.state_machine.state is not FishingState.PAUSED:
+                return False
+            event = None
+            if observation.progress is not None:
+                event = Event.RESUME_CONTROL
+            elif observation.result:
+                event = Event.RESUME_RESULT
+            elif observation.ready:
+                event = Event.RESUME_READY
+            if event is None:
+                return False
 
-        self.state_machine.handle(event, now)
-        self.bar_missing_frames = 0
-        self.result_candidate_frames = 0
-        self.pause_code = ""
-        self._error = ""
-        self._input_blocked.clear()
-        return True
+            self.state_machine.handle(event, now)
+            self.bar_missing_frames = 0
+            self.result_candidate_frames = 0
+            self.pause_code = ""
+            self._error = ""
+            self._input_blocked.clear()
+            return True
 
     def process(
+        self,
+        observation: SceneObservation,
+        packet: FramePacket | None,
+        now: float,
+        client_rect: Rect | None,
+    ) -> RuntimeSnapshot:
+        with self._lock:
+            return self._process_locked(observation, packet, now, client_rect)
+
+    def _process_locked(
         self,
         observation: SceneObservation,
         packet: FramePacket | None,
@@ -126,10 +156,21 @@ class AutomationCore:
         if packet is not None:
             self._fps = packet.fps
             age = now - packet.timestamp
-            if age > 0.2:
-                self._input(self.input_service.release_all)
             if age > 0.5:
                 self.pause("截图帧超过 0.5 秒未更新", now, code="E_STALE_FRAME")
+                return self.snapshot
+            if age > 0.2:
+                try:
+                    self.input_service.release_all()
+                except Exception as error:
+                    self._input_blocked.set()
+                    reason = (
+                        "截图帧超过 0.2 秒未更新; "
+                        f"release_all failed: {error}"
+                    )
+                    self.state_machine.pause(reason, now)
+                    self.pause_code = "E_INPUT"
+                    self._error = reason
                 return self.snapshot
 
         timeout = TIMEOUTS.get(self.state_machine.state)
@@ -179,12 +220,13 @@ class AutomationCore:
             raise WindowActionError("无法激活已绑定的游戏窗口")
 
     def _input(self, action: Callable[[], None]) -> None:
-        if self._input_blocked.is_set():
-            return
-        try:
-            action()
-        except Exception as error:
-            raise InputActionError(str(error)) from error
+        with self._lock:
+            if self._input_blocked.is_set():
+                return
+            try:
+                action()
+            except Exception as error:
+                raise InputActionError(str(error)) from error
 
     def _control(self, observation: SceneObservation, now: float) -> None:
         if observation.progress is not None:
@@ -252,10 +294,14 @@ class AutomationEngine:
         self.logger = logger or logging.getLogger(__name__)
         self._bound: Any | None = None
         self._thread: threading.Thread | None = None
+        self._capture_stop_thread: threading.Thread | None = None
+        self._capture_stop_done = threading.Event()
+        self._shutdown_started = False
         self._shutdown_event = threading.Event()
         self._resume_requested = threading.Event()
         self._callbacks: list[Callable[[RuntimeSnapshot], None]] = []
         self._lifecycle_lock = threading.RLock()
+        self._capture_lock = threading.Lock()
         self._pause_lock = threading.Lock()
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
@@ -282,6 +328,11 @@ class AutomationEngine:
                 raise RuntimeError("请先绑定游戏窗口")
             if self.is_running:
                 raise RuntimeError("自动化已在运行")
+            if self._shutdown_started and not self._capture_stop_done.is_set():
+                raise RuntimeError("自动化仍在关闭中")
+            self._shutdown_started = False
+            self._capture_stop_thread = None
+            self._capture_stop_done.clear()
             self._shutdown_event.clear()
             self._resume_requested.clear()
             self._diagnostic_recorded = False
@@ -297,6 +348,7 @@ class AutomationEngine:
             self._thread.start()
 
     def pause(self, reason: str) -> None:
+        self._resume_requested.clear()
         frame = (
             None
             if reason.strip().upper().startswith("F8")
@@ -309,33 +361,47 @@ class AutomationEngine:
             self._resume_requested.set()
 
     def shutdown(self) -> None:
+        deadline = time.monotonic() + 2.0
         with self._lifecycle_lock:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
             self._shutdown_event.set()
             self._resume_requested.clear()
-            self.core.block_input()
-            try:
-                self.frame_source.stop()
-            except Exception as error:
-                self.logger.warning("停止截屏失败: %s", error)
-            self.core.release_inputs()
             thread = self._thread
+        self._pause(
+            "E_USER_PAUSE",
+            "程序关闭",
+            self._last_frame,
+            save_diagnostic=False,
+        )
+        self._request_capture_stop()
 
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 self.logger.warning("自动化工作线程在 2 秒内未退出")
             else:
                 with self._lifecycle_lock:
                     if self._thread is thread:
                         self._thread = None
+        self._capture_stop_done.wait(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+        if not self._capture_stop_done.is_set():
+            self.logger.warning("截屏清理在 2 秒内未退出")
 
     def _run(self) -> None:
         try:
             bound = self._require_bound()
             try:
-                self.frame_source.start(bound.device_index, bound.output_index)
+                capture_started = self._start_capture(
+                    bound.device_index, bound.output_index
+                )
             except Exception as error:
                 self._pause("E_CAPTURE", str(error), None)
+                return
+            if not capture_started:
                 return
 
             while not self._shutdown_event.is_set():
@@ -349,8 +415,6 @@ class AutomationEngine:
                 now = self.clock()
                 self._last_frame = packet.frame
 
-                if now - packet.timestamp > 0.2:
-                    self.core.release_inputs()
                 if now - packet.timestamp > 0.5:
                     self._pause(
                         "E_STALE_FRAME",
@@ -359,17 +423,35 @@ class AutomationEngine:
                     )
                     self._shutdown_event.wait(0.005)
                     continue
+                if now - packet.timestamp > 0.2:
+                    try:
+                        self.core.release_inputs()
+                    except InputActionError as error:
+                        self._pause("E_INPUT", str(error), packet.frame)
+                    self._shutdown_event.wait(0.005)
+                    continue
 
                 try:
-                    bound = self._refresh_and_validate_window(bound, now)
+                    bound, capture_restarted = (
+                        self._refresh_and_validate_window(bound, now)
+                    )
+                except CaptureActionError as error:
+                    self._pause("E_CAPTURE", str(error), packet.frame)
+                    self._shutdown_event.wait(0.005)
+                    continue
                 except Exception as error:
                     self._pause("E_WINDOW", str(error), packet.frame)
                     self._shutdown_event.wait(0.005)
                     continue
+                if capture_restarted:
+                    continue
 
+                resume_requested_for_observation = (
+                    self._resume_requested.is_set()
+                )
                 if (
                     self.core.snapshot.state is FishingState.PAUSED
-                    and not self._resume_requested.is_set()
+                    and not resume_requested_for_observation
                 ):
                     self._shutdown_event.wait(0.005)
                     continue
@@ -385,11 +467,19 @@ class AutomationEngine:
                     continue
 
                 if self.core.snapshot.state is FishingState.PAUSED:
-                    self._resume_requested.clear()
-                    resumed = self.core.resume(observation, now)
-                    if resumed:
-                        with self._pause_lock:
-                            self._diagnostic_recorded = False
+                    with self._pause_lock:
+                        resume_attempted = (
+                            resume_requested_for_observation
+                            and self._resume_requested.is_set()
+                        )
+                        if resume_attempted:
+                            self._resume_requested.clear()
+                            resumed = self.core.resume(observation, now)
+                            if resumed:
+                                self._diagnostic_recorded = False
+                    if not resume_attempted:
+                        self._shutdown_event.wait(0.005)
+                        continue
                     self._publish()
                     self._shutdown_event.wait(0.001)
                     continue
@@ -428,32 +518,60 @@ class AutomationEngine:
         except Exception as error:
             self._pause("E_AUTOMATION", str(error), self._last_frame)
         finally:
-            try:
-                self.frame_source.stop()
-            except Exception as error:
-                self.logger.warning("停止截屏失败: %s", error)
+            self._request_capture_stop()
 
     def _pause(
         self,
         code: str,
         detail: str,
         frame: np.ndarray | None,
+        *,
+        save_diagnostic: bool = True,
     ) -> None:
         with self._pause_lock:
-            self.core.block_input()
-            already_paused = self.core.snapshot.state is FishingState.PAUSED
-            if not already_paused:
-                self.core.pause(detail, self.clock(), code=code)
-            else:
-                self.core.release_inputs()
+            self.core.pause(detail, self.clock(), code=code)
+            actual_code = self.core.pause_code
+            actual_detail = self.core.snapshot.error
 
-            if not self._diagnostic_recorded and frame is not None:
+            should_save = save_diagnostic or actual_code == "E_INPUT"
+            if (
+                should_save
+                and not self._diagnostic_recorded
+                and frame is not None
+            ):
                 self._diagnostic_recorded = True
                 try:
-                    self.diagnostics.save(frame, code, detail)
+                    self.diagnostics.save(frame, actual_code, actual_detail)
                 except Exception as error:
                     self.logger.warning("保存诊断失败: %s", error)
         self._publish()
+
+    def _request_capture_stop(self) -> None:
+        with self._lifecycle_lock:
+            if self._capture_stop_thread is not None:
+                return
+            self._capture_stop_thread = threading.Thread(
+                target=self._stop_capture,
+                name="auto-fishing-capture-stop",
+                daemon=True,
+            )
+            self._capture_stop_thread.start()
+
+    def _stop_capture(self) -> None:
+        try:
+            with self._capture_lock:
+                self.frame_source.stop()
+        except Exception as error:
+            self.logger.warning("停止截屏失败: %s", error)
+        finally:
+            self._capture_stop_done.set()
+
+    def _start_capture(self, device_index: int, output_index: int) -> bool:
+        with self._capture_lock:
+            if self._shutdown_event.is_set():
+                return False
+            self.frame_source.start(device_index, output_index)
+            return True
 
     def _publish(self) -> None:
         snapshot = self.core.snapshot
@@ -472,11 +590,13 @@ class AutomationEngine:
     def _activate_bound(self) -> bool:
         return bool(self.window_service.activate(self._require_bound()))
 
-    def _refresh_and_validate_window(self, bound: Any, now: float) -> Any:
+    def _refresh_and_validate_window(
+        self, bound: Any, now: float
+    ) -> tuple[Any, bool]:
         if not self.window_service.is_foreground(bound):
             raise WindowActionError("游戏窗口已失去前台")
         if now - self._last_refresh < 0.5:
-            return bound
+            return bound, False
 
         refreshed = self.window_service.refresh(bound)
         self._last_refresh = now
@@ -484,12 +604,19 @@ class AutomationEngine:
             refreshed.device_index != bound.device_index
             or refreshed.output_index != bound.output_index
         ):
-            self.frame_source.start(
-                refreshed.device_index,
-                refreshed.output_index,
-            )
+            try:
+                capture_started = self._start_capture(
+                    refreshed.device_index,
+                    refreshed.output_index,
+                )
+            except Exception as error:
+                raise CaptureActionError(str(error)) from error
+            if not capture_started:
+                return refreshed, True
+            self._bound = refreshed
+            return refreshed, True
         self._bound = refreshed
-        return refreshed
+        return refreshed, False
 
     @staticmethod
     def _crop_client(frame: np.ndarray, bound: Any) -> np.ndarray:
