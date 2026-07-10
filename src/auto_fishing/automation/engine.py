@@ -275,8 +275,6 @@ class AutomationCore:
             return
         if observation.ready:
             self.state_machine.handle(Event.READY_DETECTED, now)
-            if self.state_machine.state is FishingState.COMPLETE:
-                self._input(self.input_service.release_all)
 
 
 class AutomationEngine:
@@ -695,7 +693,7 @@ class AutomationEngine:
                     fps=packet.fps,
                 )
                 try:
-                    self.core.process(
+                    snapshot = self.core.process(
                         observation,
                         client_packet,
                         now,
@@ -711,10 +709,18 @@ class AutomationEngine:
                     self._pause("E_WINDOW", str(error), packet.frame)
                     continue
 
-                if self.core.snapshot.state is FishingState.PAUSED:
+                if snapshot.state is FishingState.COMPLETE:
+                    self.core.block_input()
+                    try:
+                        self.core.release_inputs()
+                    except InputActionError as error:
+                        self.logger.warning("完成后释放输入失败: %s", error)
+                    self._publish()
+                    break
+                if snapshot.state is FishingState.PAUSED:
                     self._pause(
                         self.core.pause_code or "E_TIMEOUT",
-                        self.core.snapshot.error,
+                        snapshot.error,
                         packet.frame,
                     )
                 else:
@@ -731,12 +737,18 @@ class AutomationEngine:
         publish_done: threading.Event,
         start_decided: threading.Event,
     ) -> None:
-        publish_done.wait()
-        start_decided.wait()
-        with self._pause_lock:
-            if self._start_allowed is not True:
-                return
-        self._run()
+        worker = threading.current_thread()
+        try:
+            publish_done.wait()
+            start_decided.wait()
+            with self._pause_lock:
+                if self._start_allowed is not True:
+                    return
+            self._run()
+        finally:
+            with self._lifecycle_lock:
+                if self._thread is worker:
+                    self._thread = None
 
     def _pause(
         self,

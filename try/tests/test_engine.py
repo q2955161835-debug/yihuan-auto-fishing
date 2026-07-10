@@ -492,6 +492,52 @@ def test_core_requires_two_result_candidates_before_leaving_control() -> None:
     assert not any(isinstance(event, tuple) for event in input_service.events)
 
 
+def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
+    progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
+    recognizer = ScriptedRecognizer(
+        [
+            SceneObservation(),
+            SceneObservation(bite=True),
+            SceneObservation(progress=progress),
+            SceneObservation(progress=progress),
+            SceneObservation(result=True),
+            SceneObservation(result=True),
+            SceneObservation(result=True),
+            SceneObservation(result=True),
+            SceneObservation(ready=True),
+        ]
+    )
+    engine, core, input_service, _window, source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+    )
+
+    engine.start(1)
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.COMPLETE)
+        wait_until(lambda: engine.is_running is False)
+        completed_event_count = len(input_service.events)
+        time.sleep(0.02)
+
+        assert core.snapshot.state is FishingState.COMPLETE
+        assert core.snapshot.completed == 1
+        assert core.input_blocked is True
+        assert input_service.events[-1] == "release"
+        assert len(input_service.events) == completed_event_count
+        assert source.stop_calls == 1
+        assert engine._thread is None
+
+        engine.bind(BOUND)
+        engine.start(2)
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+
+        assert core.snapshot.target == 2
+        assert engine.is_running is True
+        assert source.started == [(0, 0), (0, 0)]
+    finally:
+        engine.shutdown()
+
+
 def test_core_stale_frame_releases_after_point_two_and_pauses_after_point_five() -> None:
     core, input_service, _state_machine = make_core(state=FishingState.CONTROL)
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
