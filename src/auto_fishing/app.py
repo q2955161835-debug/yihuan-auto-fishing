@@ -46,6 +46,7 @@ class AppController:
         self._snapshot_queue: SimpleQueue[RuntimeSnapshot] = SimpleQueue()
         self._snapshot_poll_started = False
         self._pending_complete: tuple[RuntimeSnapshot, int] | None = None
+        self._pending_start_done: StartDone | None = None
 
     def subscribe(self, callback: Callable[[RuntimeSnapshot], None]) -> None:
         self._callbacks.append(callback)
@@ -113,10 +114,19 @@ class AppController:
         on_tick: BindTick,
         on_done: BindDone,
     ) -> None:
+        cancelled = self._cancel_pending_start_countdown()
+        if cancelled is not None:
+            cancelled("开始倒计时已取消")
         self._start_binding_countdown(on_tick, on_done)
 
     def rebind(self, on_tick: BindTick, on_done: BindDone) -> None:
+        cancelled = self._cancel_pending_start_countdown()
+        if cancelled is not None:
+            cancelled("开始倒计时已取消")
         with self._command_condition:
+            if self._starting or self.engine.is_running:
+                on_done(None, "自动化已在启动或运行，不能重新绑定")
+                return
             paused = self._state is FishingState.PAUSED
         if paused:
             if not self._begin_command():
@@ -186,6 +196,16 @@ class AppController:
                 self._countdown_generation += 1
             raise
 
+    def _cancel_pending_start_countdown(self) -> StartDone | None:
+        with self._command_condition:
+            if self._pending_start_done is None:
+                return None
+            cancelled = self._pending_start_done
+            self._pending_start_done = None
+            self._countdown_active = False
+            self._countdown_generation += 1
+            return cancelled
+
     def start_after_countdown(
         self,
         target: int,
@@ -198,9 +218,13 @@ class AppController:
             if self._countdown_active:
                 on_done("倒计时正在进行")
                 return
+            if self._starting or self.engine.is_running:
+                on_done("自动化已在运行")
+                return
             self._countdown_active = True
             self._countdown_generation += 1
             generation = self._countdown_generation
+            self._pending_start_done = on_done
 
         def advance(seconds: int) -> None:
             with self._command_condition:
@@ -211,6 +235,7 @@ class AppController:
                     self.schedule(1000, lambda: advance(seconds - 1))
                     return
                 self._countdown_active = False
+                self._pending_start_done = None
                 self._starting = True
                 self._active_commands += 1
 
@@ -231,6 +256,7 @@ class AppController:
             with self._command_condition:
                 self._countdown_active = False
                 self._countdown_generation += 1
+                self._pending_start_done = None
             raise
 
     def start(self, target: int) -> None:
@@ -290,6 +316,7 @@ class AppController:
             self._closed = True
             self._countdown_active = False
             self._countdown_generation += 1
+            self._pending_start_done = None
             self._snapshot_generation += 1
             self._pending_complete = None
             while self._active_commands:

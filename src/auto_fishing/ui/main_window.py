@@ -187,6 +187,8 @@ class MainWindow:
         self.state_var.set(self._state.value)
         if error:
             self.error_var.set(error)
+        else:
+            self._runtime_active = True
         self._refresh_control_states()
 
     def on_pause_or_resume(self) -> None:

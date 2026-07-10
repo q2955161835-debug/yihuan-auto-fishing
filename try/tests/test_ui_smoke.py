@@ -113,6 +113,24 @@ def test_window_is_topmost_and_validates_count(root) -> None:
     assert not window.start_button.instate(["disabled"])
 
 
+def test_successful_start_countdown_keeps_controls_locked_until_snapshot(root) -> None:
+    controller = FakeController()
+    window = MainWindow(root, controller, FakeSettings())
+    window.on_bind()
+    assert controller.bind_callbacks is not None
+    _on_tick, on_bind_done = controller.bind_callbacks
+    on_bind_done("异环", None)
+
+    window.on_start()
+    assert controller.start_callbacks is not None
+    _on_tick, on_start_done = controller.start_callbacks
+    on_start_done(None)
+
+    assert window.start_button.instate(["disabled"])
+    assert window.count_spinbox.instate(["disabled"])
+    assert window.bind_button.instate(["disabled"])
+
+
 def test_window_geometry_supports_negative_monitor_coordinates(root) -> None:
     controller = FakeController()
     original_geometry = root.geometry
@@ -296,6 +314,12 @@ class BridgeEngine:
             self.events.append("engine.shutdown")
 
 
+class RunningStartEngine(BridgeEngine):
+    def start(self, target: int) -> None:
+        self.running = True
+        super().start(target)
+
+
 class BlockingPauseEngine(BridgeEngine):
     def __init__(self) -> None:
         super().__init__()
@@ -455,6 +479,51 @@ def test_shutdown_cancels_pending_start_countdown() -> None:
     assert ("start", 2) not in engine.calls
     assert completed == []
     assert engine.calls[-1] == "shutdown"
+
+
+def test_controller_rejects_second_start_after_engine_reports_running() -> None:
+    scheduler = ManualScheduler()
+    engine = RunningStartEngine()
+    controller = AppController(engine, BindingService(), scheduler)
+    controller.start_after_countdown(2, lambda _seconds: None, lambda _error: None)
+    for _ in range(3):
+        scheduler.run_next(1000)
+
+    ticks: list[int] = []
+    completed: list[str | None] = []
+    controller.start_after_countdown(3, ticks.append, completed.append)
+
+    assert ticks == []
+    assert completed == ["自动化已在运行"]
+    assert engine.calls == [("start", 2)]
+
+
+def test_rebind_cancels_pending_start_countdown() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    binding_service = BindingService()
+    controller = AppController(engine, binding_service, scheduler)
+    start_done: list[str | None] = []
+    bind_ticks: list[int] = []
+    bind_done: list[tuple[str | None, str | None]] = []
+
+    controller.start_after_countdown(
+        2,
+        lambda _seconds: None,
+        start_done.append,
+    )
+    controller.rebind(
+        bind_ticks.append,
+        lambda title, error: bind_done.append((title, error)),
+    )
+
+    assert start_done == ["开始倒计时已取消"]
+    assert bind_ticks == [3]
+    while scheduler.pending:
+        scheduler.run_next(1000)
+
+    assert engine.calls == [("bind", binding_service.bound)]
+    assert bind_done == [("异环", None)]
 
 
 def test_first_binding_failure_stays_unbound_and_keeps_start_disabled(root) -> None:
