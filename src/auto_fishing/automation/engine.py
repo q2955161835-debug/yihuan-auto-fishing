@@ -106,6 +106,16 @@ class AutomationCore:
         replace_existing: bool = False,
     ) -> None:
         with self._lock:
+            if self.state_machine.state is FishingState.COMPLETE:
+                self._input_blocked.set()
+                try:
+                    self.input_service.release_all()
+                except Exception as error:
+                    self.pause_code = "E_INPUT"
+                    self._error = (
+                        f"{reason}; release_all failed: {error}"
+                    )
+                return
             was_paused = self.state_machine.state is FishingState.PAUSED
             preserve_existing = was_paused and not replace_existing
             final_reason = self._error if preserve_existing else reason

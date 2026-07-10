@@ -373,6 +373,21 @@ class StartBarrierCore:
         self.core.start(target, now)
 
 
+def single_round_observations() -> list[SceneObservation]:
+    progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
+    return [
+        SceneObservation(),
+        SceneObservation(bite=True),
+        SceneObservation(progress=progress),
+        SceneObservation(progress=progress),
+        SceneObservation(result=True),
+        SceneObservation(result=True),
+        SceneObservation(result=True),
+        SceneObservation(result=True),
+        SceneObservation(ready=True),
+    ]
+
+
 def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -493,20 +508,7 @@ def test_core_requires_two_result_candidates_before_leaving_control() -> None:
 
 
 def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
-    progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
-    recognizer = ScriptedRecognizer(
-        [
-            SceneObservation(),
-            SceneObservation(bite=True),
-            SceneObservation(progress=progress),
-            SceneObservation(progress=progress),
-            SceneObservation(result=True),
-            SceneObservation(result=True),
-            SceneObservation(result=True),
-            SceneObservation(result=True),
-            SceneObservation(ready=True),
-        ]
-    )
+    recognizer = ScriptedRecognizer(single_round_observations())
     engine, core, input_service, _window, source = make_engine(
         tmp_path,
         recognizer=recognizer,
@@ -536,6 +538,117 @@ def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
         assert source.started == [(0, 0), (0, 0)]
     finally:
         engine.shutdown()
+
+
+def test_complete_publish_racing_shutdown_preserves_terminal_state(
+    tmp_path,
+) -> None:
+    recognizer = ScriptedRecognizer(single_round_observations())
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+    )
+    complete_publish_entered = threading.Event()
+    allow_complete_publish = threading.Event()
+
+    def subscriber(snapshot) -> None:
+        if (
+            snapshot.state is FishingState.COMPLETE
+            and not complete_publish_entered.is_set()
+        ):
+            complete_publish_entered.set()
+            assert allow_complete_publish.wait(timeout=2.2)
+
+    engine.subscribe(subscriber)
+    engine.start(1)
+    assert complete_publish_entered.wait(timeout=1)
+    releases_before_shutdown = input_service.events.count("release")
+    shutdown_thread = threading.Thread(target=engine.shutdown)
+    shutdown_thread.start()
+
+    try:
+        wait_until(
+            lambda: input_service.events.count("release")
+            > releases_before_shutdown
+        )
+        allow_complete_publish.set()
+        shutdown_thread.join(timeout=1)
+
+        assert shutdown_thread.is_alive() is False
+        assert core.snapshot.state is FishingState.COMPLETE
+        assert core.snapshot.completed == 1
+        assert core.input_blocked is True
+    finally:
+        allow_complete_publish.set()
+        shutdown_thread.join(timeout=1)
+        engine.shutdown()
+
+
+def test_pause_and_f8_after_worker_exit_preserve_complete(tmp_path) -> None:
+    recognizer = ScriptedRecognizer(single_round_observations())
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+    )
+
+    engine.start(1)
+    try:
+        wait_until(lambda: engine.is_running is False)
+        releases_before_pause = input_service.events.count("release")
+
+        engine.pause("按钮暂停")
+        assert core.snapshot.state is FishingState.COMPLETE
+        engine.pause("F8 紧急暂停")
+
+        assert core.snapshot.state is FishingState.COMPLETE
+        assert core.snapshot.completed == 1
+        assert core.input_blocked is True
+        assert input_service.events.count("release") == (
+            releases_before_pause + 2
+        )
+    finally:
+        engine.shutdown()
+
+
+def test_complete_pause_records_release_failure_without_losing_terminal_state(
+) -> None:
+    input_service = ReleaseFailingInput(fail_release=False)
+    state_machine = FishingStateMachine()
+    core = AutomationCore(
+        state_machine=state_machine,
+        controller=ProgressController(),
+        input_service=input_service,
+        scene_recognizer=SceneRecognizer(),
+        activate_game=lambda: True,
+    )
+    core.start(1, 0.0)
+    for index, observation in enumerate(single_round_observations(), 1):
+        core.process(observation, None, float(index), CLIENT)
+    assert core.snapshot.state is FishingState.COMPLETE
+    input_service.fail_release = True
+
+    core.pause("F8 terminal release", 10.0)
+
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
+    assert core.input_blocked is True
+    assert core.pause_code == "E_INPUT"
+    assert "F8 terminal release" in core.snapshot.error
+    assert "release_all failed: key release failed" in core.snapshot.error
+
+
+def test_core_pause_still_transitions_non_terminal_state_to_paused() -> None:
+    core, input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+
+    core.pause("普通暂停", 1.0, code="E_USER_PAUSE")
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.snapshot.error == "普通暂停"
+    assert core.pause_code == "E_USER_PAUSE"
+    assert core.input_blocked is True
+    assert input_service.events[-1] == "release"
 
 
 def test_core_stale_frame_releases_after_point_two_and_pauses_after_point_five() -> None:
