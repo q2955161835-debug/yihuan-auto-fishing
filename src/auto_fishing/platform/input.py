@@ -58,6 +58,8 @@ class InputBackend(Protocol):
 
     def click(self, x: int, y: int) -> None: ...
 
+    def mouse_up(self) -> None: ...
+
 
 class SafeInput:
     def __init__(
@@ -68,6 +70,7 @@ class SafeInput:
         self.backend = backend
         self.sleep = sleep
         self.held: set[str] = set()
+        self.mouse_held = False
 
     def _down(self, key: str) -> None:
         if key not in self.held:
@@ -76,10 +79,8 @@ class SafeInput:
 
     def _up(self, key: str) -> None:
         if key in self.held:
-            try:
-                self.backend.key_up(key)
-            finally:
-                self.held.discard(key)
+            self.backend.key_up(key)
+            self.held.remove(key)
 
     def tap_f(self) -> None:
         self._down("F")
@@ -100,14 +101,46 @@ class SafeInput:
             self._down(desired)
 
     def click(self, x: int, y: int) -> None:
-        self.backend.click(x, y)
+        self.mouse_held = True
+        try:
+            self.backend.click(x, y)
+        except Exception as click_error:
+            try:
+                self.backend.mouse_up()
+            except Exception as release_error:
+                raise InputFailure(
+                    f"click failed: {click_error}; "
+                    f"mouse release failed: {release_error}"
+                ) from release_error
+            else:
+                self.mouse_held = False
+            raise
+        else:
+            self.mouse_held = False
 
     def release_all(self) -> None:
+        failures: list[tuple[str, Exception]] = []
         for key in tuple(self.held):
             try:
                 self.backend.key_up(key)
-            finally:
+            except Exception as error:
+                failures.append((key, error))
+            else:
                 self.held.discard(key)
+        if self.mouse_held:
+            try:
+                self.backend.mouse_up()
+            except Exception as error:
+                failures.append(("mouse", error))
+            else:
+                self.mouse_held = False
+        if failures:
+            details = "; ".join(
+                f"{key}: {error}" for key, error in failures
+            )
+            raise InputFailure(
+                f"failed to release inputs: {details}"
+            ) from failures[0][1]
 
 
 class Win32InputBackend:
@@ -152,6 +185,9 @@ class Win32InputBackend:
             self._mouse_input(self._MOUSEEVENTF_LEFTDOWN),
             self._mouse_input(self._MOUSEEVENTF_LEFTUP),
         )
+
+    def mouse_up(self) -> None:
+        self._send_inputs(self._mouse_input(self._MOUSEEVENTF_LEFTUP))
 
     def _send_key(self, key: str, *, key_up: bool) -> None:
         normalized = key.upper()

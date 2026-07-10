@@ -14,20 +14,24 @@ from auto_fishing.platform.input import (
 
 
 class FakeBackend:
-    def __init__(self, *, fail_up: set[str] | None = None) -> None:
+    def __init__(self, *, fail_up: dict[str, int] | None = None) -> None:
         self.events: list[tuple[object, ...]] = []
-        self.fail_up = fail_up or set()
+        self.fail_up = dict(fail_up or {})
 
     def key_down(self, key: str) -> None:
         self.events.append(("down", key))
 
     def key_up(self, key: str) -> None:
         self.events.append(("up", key))
-        if key in self.fail_up:
-            raise RuntimeError(f"failed to release {key}")
+        if self.fail_up.get(key, 0) > 0:
+            self.fail_up[key] -= 1
+            raise InputFailure(f"failed to release {key}")
 
     def click(self, x: int, y: int) -> None:
         self.events.append(("click", x, y))
+
+    def mouse_up(self) -> None:
+        self.events.append(("mouse_up",))
 
 
 def test_direction_switch_releases_old_key_first() -> None:
@@ -51,16 +55,27 @@ def test_release_all_is_idempotent() -> None:
     assert backend.events == [("down", "D"), ("up", "D")]
 
 
-def test_release_all_forgets_key_even_when_release_fails() -> None:
-    backend = FakeBackend(fail_up={"D"})
+def test_release_all_retries_failed_key_after_releasing_others() -> None:
+    backend = FakeBackend(fail_up={"F": 2})
     safe = SafeInput(backend, sleep=lambda _: None)
+
+    with pytest.raises(InputFailure, match="failed to release F"):
+        safe.tap_f()
     safe.set_direction(Direction.RIGHT)
 
-    with pytest.raises(RuntimeError, match="failed to release D"):
+    with pytest.raises(InputFailure, match="failed to release F"):
         safe.release_all()
+
+    assert backend.events.count(("up", "D")) == 1
+    assert backend.events.count(("up", "F")) == 2
+
+    safe.release_all()
+    events_after_retry = list(backend.events)
     safe.release_all()
 
-    assert backend.events == [("down", "D"), ("up", "D")]
+    assert backend.events.count(("up", "D")) == 1
+    assert backend.events.count(("up", "F")) == 3
+    assert backend.events == events_after_retry
 
 
 def test_tap_f_and_click_are_balanced() -> None:
@@ -91,6 +106,7 @@ class FakeUser32:
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []
         self.send_result: int | None = None
+        self.send_results: list[int] = []
         self.cursor_result = 1
 
     def SendInput(self, count: int, inputs: object, size: int) -> int:
@@ -103,6 +119,8 @@ class FakeUser32:
             else:
                 captured.append(("mouse", item.union.mi.dwFlags))
         self.events.append(("send", captured, size))
+        if self.send_results:
+            return self.send_results.pop(0)
         return count if self.send_result is None else self.send_result
 
     def SetCursorPos(self, x: int, y: int) -> int:
@@ -148,6 +166,45 @@ def test_win32_click_moves_cursor_then_sends_left_down_and_up() -> None:
             ctypes.sizeof(INPUT),
         ),
     ]
+
+
+def test_safe_click_releases_mouse_after_partial_win32_send() -> None:
+    user32 = FakeUser32()
+    user32.send_results = [1, 1]
+    safe = SafeInput(Win32InputBackend(user32=user32), sleep=lambda _: None)
+
+    with pytest.raises(InputFailure, match="SendInput sent 1 of 2"):
+        safe.click(200, 300)
+
+    assert user32.events[-1] == (
+        "send",
+        [("mouse", 0x0004)],
+        ctypes.sizeof(INPUT),
+    )
+    events_after_cleanup = list(user32.events)
+    safe.release_all()
+    assert user32.events == events_after_cleanup
+
+
+def test_safe_click_retries_mouse_release_after_cleanup_fails() -> None:
+    user32 = FakeUser32()
+    user32.send_results = [1, 0, 1]
+    safe = SafeInput(Win32InputBackend(user32=user32), sleep=lambda _: None)
+
+    with pytest.raises(InputFailure, match="mouse release failed"):
+        safe.click(200, 300)
+
+    safe.release_all()
+    events_after_retry = list(user32.events)
+    safe.release_all()
+
+    mouse_sends = [event for event in user32.events if event[0] == "send"]
+    assert [event[1] for event in mouse_sends] == [
+        [("mouse", 0x0002), ("mouse", 0x0004)],
+        [("mouse", 0x0004)],
+        [("mouse", 0x0004)],
+    ]
+    assert user32.events == events_after_retry
 
 
 def test_win32_rejects_unknown_key_without_sending_input() -> None:
