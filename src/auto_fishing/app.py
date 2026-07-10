@@ -15,6 +15,8 @@ from auto_fishing.ui.main_window import MainWindow
 
 BindTick = Callable[[int], None]
 BindDone = Callable[[str | None, str | None], None]
+StartTick = Callable[[int], None]
+StartDone = Callable[[str | None], None]
 Scheduler = Callable[[int, Callable[[], None]], Any]
 
 
@@ -31,7 +33,7 @@ class AppController:
         self.window_service = window_service
         self.schedule = schedule
         self._countdown_generation = 0
-        self._binding = False
+        self._countdown_active = False
         self._closed = False
         self._starting = False
         self._state = FishingState.UNBOUND
@@ -140,10 +142,10 @@ class AppController:
         with self._command_condition:
             if self._closed:
                 return
-            if self._binding:
+            if self._countdown_active:
                 on_done(None, "绑定倒计时正在进行")
                 return
-            self._binding = True
+            self._countdown_active = True
             self._countdown_generation += 1
             generation = self._countdown_generation
 
@@ -173,14 +175,61 @@ class AppController:
             finally:
                 self._finish_command()
                 with self._command_condition:
-                    self._binding = False
+                    self._countdown_active = False
             on_done(title, error_message)
 
         try:
             advance(3)
         except BaseException:
             with self._command_condition:
-                self._binding = False
+                self._countdown_active = False
+                self._countdown_generation += 1
+            raise
+
+    def start_after_countdown(
+        self,
+        target: int,
+        on_tick: StartTick,
+        on_done: StartDone,
+    ) -> None:
+        with self._command_condition:
+            if self._closed:
+                return
+            if self._countdown_active:
+                on_done("倒计时正在进行")
+                return
+            self._countdown_active = True
+            self._countdown_generation += 1
+            generation = self._countdown_generation
+
+        def advance(seconds: int) -> None:
+            with self._command_condition:
+                if self._closed or generation != self._countdown_generation:
+                    return
+                if seconds > 0:
+                    on_tick(seconds)
+                    self.schedule(1000, lambda: advance(seconds - 1))
+                    return
+                self._countdown_active = False
+                self._starting = True
+                self._active_commands += 1
+
+            error_message: str | None = None
+            try:
+                self.engine.start(target)
+            except Exception as error:
+                error_message = str(error)
+            finally:
+                with self._command_condition:
+                    self._starting = False
+                self._finish_command()
+            on_done(error_message)
+
+        try:
+            advance(3)
+        except BaseException:
+            with self._command_condition:
+                self._countdown_active = False
                 self._countdown_generation += 1
             raise
 
@@ -239,7 +288,7 @@ class AppController:
             if self._closed:
                 return
             self._closed = True
-            self._binding = False
+            self._countdown_active = False
             self._countdown_generation += 1
             self._snapshot_generation += 1
             self._pending_complete = None

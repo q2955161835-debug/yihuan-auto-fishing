@@ -167,10 +167,27 @@ class MainWindow:
         if target is None:
             self.error_var.set("数量必须是 1～999 的整数")
             return
+        self._countdown_active = True
+        self.error_var.set("无")
+        self._refresh_control_states()
         try:
-            self.controller.start(target)
+            self.controller.start_after_countdown(
+                target,
+                self._on_start_tick,
+                self._on_start_done,
+            )
         except Exception as error:
-            self.error_var.set(str(error))
+            self._on_start_done(str(error))
+
+    def _on_start_tick(self, seconds: int) -> None:
+        self.state_var.set(f"开始倒计时：{seconds}")
+
+    def _on_start_done(self, error: str | None) -> None:
+        self._countdown_active = False
+        self.state_var.set(self._state.value)
+        if error:
+            self.error_var.set(error)
+        self._refresh_control_states()
 
     def on_pause_or_resume(self) -> None:
         try:
@@ -221,7 +238,7 @@ class MainWindow:
     def _refresh_control_states(self) -> None:
         lock_binding = self._countdown_active or self._runtime_active
         self.count_spinbox.configure(
-            state="disabled" if self._runtime_active else "normal"
+            state="disabled" if lock_binding else "normal"
         )
         self.bind_button.configure(
             state="disabled" if lock_binding else "normal"
