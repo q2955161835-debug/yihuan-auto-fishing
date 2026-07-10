@@ -5,10 +5,11 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+.worktrees/
+.superpowers/
 build/
 dist/
 logs/
 diagnostics/
 try/generated/
 try/output/
-
