@@ -693,7 +693,11 @@ class AutomationEngine:
                 return
 
             while not self._stop_requested():
-                paused_without_request, _, _ = self._read_pause_gate()
+                (
+                    paused_without_request,
+                    _,
+                    operation_epoch,
+                ) = self._read_pause_gate()
                 if paused_without_request:
                     self._shutdown_event.wait(0.005)
                     continue
@@ -702,8 +706,15 @@ class AutomationEngine:
                 except Exception as error:
                     if self._stop_requested():
                         break
-                    self._pause("E_CAPTURE", str(error), self._last_frame)
-                    break
+                    pause_applied = self._pause(
+                        "E_CAPTURE",
+                        str(error),
+                        self._last_frame,
+                        expected_epoch=operation_epoch,
+                    )
+                    if pause_applied:
+                        break
+                    continue
                 if self._stop_requested():
                     break
                 (
@@ -730,7 +741,12 @@ class AutomationEngine:
                     try:
                         self.core.release_inputs()
                     except InputActionError as error:
-                        self._pause("E_INPUT", str(error), packet.frame)
+                        self._pause(
+                            "E_INPUT",
+                            str(error),
+                            packet.frame,
+                            expected_epoch=frame_epoch,
+                        )
                     self._shutdown_event.wait(0.005)
                     continue
 

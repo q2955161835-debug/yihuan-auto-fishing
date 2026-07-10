@@ -8,7 +8,11 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from auto_fishing.automation.engine import AutomationCore, AutomationEngine
+from auto_fishing.automation.engine import (
+    AutomationCore,
+    AutomationEngine,
+    InputActionError,
+)
 from auto_fishing.automation.state_machine import Event, FishingStateMachine
 from auto_fishing.model import (
     Direction,
@@ -188,6 +192,38 @@ class FreshFrameSource:
 
     def stop(self) -> None:
         self.stop_calls += 1
+
+
+class BlockingSecondLatestFailure(FreshFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.latest_calls = 0
+        self.second_latest_entered = threading.Event()
+        self.allow_second_latest = threading.Event()
+
+    def latest(self) -> FramePacket:
+        self.latest_calls += 1
+        if self.latest_calls == 2:
+            self.second_latest_entered.set()
+            assert self.allow_second_latest.wait(timeout=1)
+            raise RuntimeError("旧截图调用迟到失败")
+        return super().latest()
+
+
+class BlockingSecondStaleFrame(FreshFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.latest_calls = 0
+        self.second_latest_entered = threading.Event()
+        self.allow_second_latest = threading.Event()
+
+    def latest(self) -> FramePacket:
+        self.latest_calls += 1
+        if self.latest_calls == 2:
+            self.second_latest_entered.set()
+            assert self.allow_second_latest.wait(timeout=1)
+            return FramePacket(self.frame, time.monotonic() - 0.3, 30.0)
+        return super().latest()
 
 
 class FixedFrameSource(FreshFrameSource):
@@ -432,6 +468,37 @@ class StartBarrierCore:
         self.start_entered.set()
         assert self.allow_start.wait(timeout=1)
         self.core.start(target, now)
+
+
+class BlockingInputActionError(InputActionError):
+    def __init__(self) -> None:
+        super().__init__("迟到的释放输入错误")
+        self.stringify_entered = threading.Event()
+        self.allow_stringify = threading.Event()
+
+    def __str__(self) -> str:
+        self.stringify_entered.set()
+        assert self.allow_stringify.wait(timeout=1)
+        return super().__str__()
+
+
+class LateReleaseCoreProxy:
+    def __init__(
+        self,
+        core: AutomationCore,
+        late_error: BlockingInputActionError,
+    ) -> None:
+        self.core = core
+        self.late_error = late_error
+
+    def __getattr__(self, name: str):
+        return getattr(self.core, name)
+
+    def release_inputs(self) -> None:
+        try:
+            self.core.release_inputs()
+        except InputActionError as error:
+            raise self.late_error from error
 
 
 def single_round_observations() -> list[SceneObservation]:
@@ -1164,6 +1231,76 @@ def test_late_window_error_cannot_invalidate_new_resume_request(tmp_path) -> Non
         assert input_service.events.count("F") == 2
     finally:
         error.allow_stringify.set()
+        engine.shutdown()
+
+
+def test_late_latest_error_cannot_clear_resume_token_or_exit_worker(tmp_path) -> None:
+    source = BlockingSecondLatestFailure()
+    recognizer = OrderedResumeRecognizer([])
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        frame_source=source,
+        recognizer=recognizer,
+    )
+    engine.start(1)
+    assert source.second_latest_entered.wait(timeout=1)
+    assert core.snapshot.state is FishingState.WAIT_BITE
+
+    engine.pause("用户暂停")
+    recognizer.resume_mode = True
+    engine.resume()
+    resume_epoch = engine._pause_epoch
+    assert engine._resume_request == resume_epoch
+    source.allow_second_latest.set()
+
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+        assert engine._pause_epoch == resume_epoch
+        assert engine._resume_request is None
+        assert engine.is_running is True
+        assert recognizer.resume_frames >= 3
+        assert input_service.events.count("F") == 2
+    finally:
+        source.allow_second_latest.set()
+        engine.shutdown()
+
+
+def test_late_stale_frame_release_error_cannot_clear_resume_token(tmp_path) -> None:
+    source = BlockingSecondStaleFrame()
+    input_service = ReleaseFailingInput(fail_release=False)
+    recognizer = OrderedResumeRecognizer([])
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path,
+        frame_source=source,
+        input_service=input_service,
+        recognizer=recognizer,
+    )
+    engine.start(1)
+    assert source.second_latest_entered.wait(timeout=1)
+    assert core.snapshot.state is FishingState.WAIT_BITE
+    late_error = BlockingInputActionError()
+    engine.core = LateReleaseCoreProxy(core, late_error)
+    input_service.fail_release = True
+    source.allow_second_latest.set()
+    assert late_error.stringify_entered.wait(timeout=1)
+
+    engine.pause("用户暂停")
+    recognizer.resume_mode = True
+    engine.resume()
+    resume_epoch = engine._pause_epoch
+    assert engine._resume_request == resume_epoch
+    late_error.allow_stringify.set()
+
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+        assert engine._pause_epoch == resume_epoch
+        assert engine._resume_request is None
+        assert engine.is_running is True
+        assert recognizer.resume_frames >= 3
+        assert input_service.events.count("F") == 2
+    finally:
+        late_error.allow_stringify.set()
+        source.allow_second_latest.set()
         engine.shutdown()
 
 
