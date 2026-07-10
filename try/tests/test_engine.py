@@ -1181,11 +1181,10 @@ def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> No
     engine.shutdown()
 
 
-def test_engine_start_activates_game_before_worker_checks_foreground(
+def test_engine_start_checks_foreground_without_forcing_activation(
     tmp_path,
 ) -> None:
-    events: list[str] = []
-    window_service = ActivatingWindowService(events)
+    window_service = RecordingWindowService()
     engine, core, _input, _window, _source = make_engine(
         tmp_path,
         window_service=window_service,
@@ -1195,10 +1194,29 @@ def test_engine_start_activates_game_before_worker_checks_foreground(
     try:
         wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
 
-        assert events[:2] == ["activate", "foreground"]
-        assert window_service.activate_calls >= 1
+        assert window_service.activate_calls == 1
     finally:
         engine.shutdown()
+
+
+def test_engine_start_rejects_background_game_without_worker(tmp_path) -> None:
+    window_service = RecordingWindowService()
+    window_service.foreground = False
+    engine, core, _input, _window, source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="请在倒计时结束前切回已绑定的游戏窗口",
+    ):
+        engine.start(1)
+
+    assert window_service.activate_calls == 0
+    assert source.started == []
+    assert engine.is_running is False
+    assert core.snapshot.state is FishingState.UNBOUND
 
 
 def test_resume_activates_game_and_keeps_request_until_third_stable_frame(

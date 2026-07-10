@@ -381,14 +381,11 @@ class AutomationEngine:
             bound = self._bound
 
         try:
-            activated = bool(self.window_service.activate(bound))
-            foreground = activated and bool(
-                self.window_service.is_foreground(bound)
-            )
+            foreground = bool(self.window_service.is_foreground(bound))
         except Exception as error:
-            raise RuntimeError(f"无法激活游戏窗口: {error}") from error
+            raise RuntimeError(f"无法确认游戏窗口前台状态: {error}") from error
         if not foreground:
-            raise RuntimeError("无法激活并确认已绑定的游戏窗口")
+            raise RuntimeError("请在倒计时结束前切回已绑定的游戏窗口")
 
         with self._lifecycle_lock:
             if self._bound is not bound:
