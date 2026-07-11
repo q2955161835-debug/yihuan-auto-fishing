@@ -543,7 +543,11 @@ class Application:
         from auto_fishing.automation.state_machine import FishingStateMachine
         from auto_fishing.capture.dxcam_source import DxcamFrameSource
         from auto_fishing.platform.hotkey import GlobalHotkey
-        from auto_fishing.platform.input import SafeInput, Win32InputBackend
+        from auto_fishing.platform.input import SafeInput, Win32MouseDriver
+        from auto_fishing.platform.on_screen_keyboard import (
+            OnScreenKeyboardInputBackend,
+            OnScreenKeyboardWindow,
+        )
         from auto_fishing.platform.windowing import WindowService
         from auto_fishing.storage.diagnostics import DiagnosticsStore
         from auto_fishing.storage.runtime_logging import RuntimeLogStore
@@ -553,8 +557,13 @@ class Application:
 
         window_service = WindowService()
         runtime_log = RuntimeLogStore(data_dir / "runs")
+        keyboard_window = OnScreenKeyboardWindow(recorder=runtime_log)
         safe_input = SafeInput(
-            Win32InputBackend(recorder=runtime_log),
+            OnScreenKeyboardInputBackend(
+                window=keyboard_window,
+                mouse=Win32MouseDriver(recorder=runtime_log),
+                recorder=runtime_log,
+            ),
             recorder=runtime_log,
         )
         scene_recognizer = SceneRecognizer()
@@ -593,6 +602,7 @@ class Application:
             ("停止 F8 热键", services.hotkey.stop),
             ("关闭自动化引擎", services.engine.shutdown),
             ("释放输入", services.safe_input.release_all),
+            ("关闭屏幕键盘输入", services.safe_input.close),
             (
                 "关闭运行日志",
                 (lambda: None)

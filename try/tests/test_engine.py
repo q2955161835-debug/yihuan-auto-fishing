@@ -39,6 +39,7 @@ class RecordingInput:
     def __init__(self) -> None:
         self.events: list[object] = []
         self.failure: Exception | None = None
+        self.prepared: list[tuple[Rect, Rect]] = []
 
     def _record(self, event: object) -> None:
         if self.failure is not None:
@@ -58,6 +59,9 @@ class RecordingInput:
     def release_all(self) -> None:
         self.events.append("release")
 
+    def prepare(self, monitor_rect: Rect, client_rect: Rect) -> None:
+        self.prepared.append((monitor_rect, client_rect))
+
 
 class ReleaseFailingInput(RecordingInput):
     def __init__(self, *, fail_release: bool = True) -> None:
@@ -69,6 +73,13 @@ class ReleaseFailingInput(RecordingInput):
             self.fail_release = False
             raise InputFailure("key release failed")
         super().release_all()
+
+
+class ReprepareFailingInput(RecordingInput):
+    def prepare(self, monitor_rect: Rect, client_rect: Rect) -> None:
+        if self.prepared:
+            raise InputFailure("屏幕键盘被关闭")
+        super().prepare(monitor_rect, client_rect)
 
 
 class BarrierInput(RecordingInput):
@@ -633,6 +644,12 @@ def make_engine(
     return engine, core, input_service, window_service, frame_source
 
 
+def test_engine_bind_prepares_input_for_bound_monitor(tmp_path) -> None:
+    _engine, _core, input_service, _window, _source = make_engine(tmp_path)
+
+    assert input_service.prepared == [(BOUND.monitor_rect, BOUND.client_rect)]
+
+
 def test_engine_records_observation_and_state_for_each_processed_frame(tmp_path):
     runtime_log = RecordingRuntimeLog()
     source = BlockingSecondLatestFailure()
@@ -1165,7 +1182,7 @@ def test_engine_refreshes_client_rect_and_crops_monitor_frame(tmp_path) -> None:
         0,
     )
     recognizer = ScriptedRecognizer()
-    engine, _core, _input, _window, _source = make_engine(
+    engine, _core, input_service, _window, _source = make_engine(
         tmp_path, recognizer=recognizer, window_service=window_service
     )
 
@@ -1178,6 +1195,36 @@ def test_engine_refreshes_client_rect_and_crops_monitor_frame(tmp_path) -> None:
 
     assert window_service.refresh_calls >= 1
     assert any(frame.shape[:2] == (540, 960) for frame in recognizer.frames)
+    assert input_service.prepared[-1] == (
+        window_service.refreshed.monitor_rect,
+        window_service.refreshed.client_rect,
+    )
+
+
+def test_engine_pauses_with_e_osk_when_keyboard_reposition_fails(tmp_path) -> None:
+    window_service = RecordingWindowService()
+    window_service.refreshed = BoundWindow(
+        100,
+        "异环",
+        Rect(100, 50, 1060, 590),
+        MONITOR,
+        0,
+        0,
+    )
+    input_service = ReprepareFailingInput()
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+        input_service=input_service,
+    )
+
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+    engine.shutdown()
+
+    assert core.pause_code == "E_OSK"
+    assert "屏幕键盘被关闭" in core.snapshot.error
+    assert input_service.events[-1] == "release"
 
 
 def test_output_restart_discards_packet_from_previous_capture_source(tmp_path) -> None:

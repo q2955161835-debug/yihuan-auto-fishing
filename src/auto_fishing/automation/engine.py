@@ -39,6 +39,10 @@ class CaptureActionError(RuntimeError):
     """The capture source failed while changing outputs."""
 
 
+class OnScreenKeyboardActionError(RuntimeError):
+    """The Windows on-screen keyboard cannot safely provide input."""
+
+
 class AutomationCore:
     """Thread-independent fishing decisions built on the formal state machine."""
 
@@ -358,6 +362,13 @@ class AutomationEngine:
         with self._lifecycle_lock:
             if self.is_running or self._starting or self._cancelling:
                 raise RuntimeError("自动化运行中不能更换绑定窗口")
+            try:
+                self.core.input_service.prepare(
+                    bound.monitor_rect,
+                    bound.client_rect,
+                )
+            except Exception as error:
+                raise RuntimeError(f"屏幕键盘准备失败: {error}") from error
             self._bound = bound
         self._runtime_event(
             "automation.bound",
@@ -785,6 +796,15 @@ class AutomationEngine:
                     )
                     self._shutdown_event.wait(0.005)
                     continue
+                except OnScreenKeyboardActionError as error:
+                    self._pause(
+                        "E_OSK",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
                 except Exception as error:
                     self._pause(
                         "E_WINDOW",
@@ -1142,6 +1162,19 @@ class AutomationEngine:
 
         refreshed = self.window_service.refresh(bound)
         self._last_refresh = now
+        if (
+            refreshed.monitor_rect != bound.monitor_rect
+            or refreshed.client_rect != bound.client_rect
+        ):
+            try:
+                self.core.input_service.prepare(
+                    refreshed.monitor_rect,
+                    refreshed.client_rect,
+                )
+            except Exception as error:
+                raise OnScreenKeyboardActionError(
+                    f"屏幕键盘重新定位失败: {error}"
+                ) from error
         if (
             refreshed.device_index != bound.device_index
             or refreshed.output_index != bound.output_index

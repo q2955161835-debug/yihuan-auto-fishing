@@ -7,6 +7,7 @@ import tkinter as tk
 import pytest
 
 from auto_fishing.app import AppController, Application, ApplicationServices
+from auto_fishing.platform.on_screen_keyboard import OnScreenKeyboardInputBackend
 from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.storage.settings import AppSettings
 from auto_fishing.ui.main_window import MainWindow
@@ -1049,6 +1050,9 @@ class AppSafeInput:
     def release_all(self) -> None:
         self.events.append("input.release_all")
 
+    def close(self) -> None:
+        self.events.append("input.close")
+
 
 class AppDiagnostics:
     def __init__(self, events: list[object]) -> None:
@@ -1129,6 +1133,7 @@ def test_application_wires_f8_and_always_cleans_up_resources() -> None:
         "hotkey.stop",
         "engine.shutdown",
         "input.release_all",
+        "input.close",
         "root.destroy",
     ]
 
@@ -1163,6 +1168,8 @@ def test_application_starts_and_closes_runtime_log() -> None:
     )
     assert events.index("runtime_log.start") < events.index("window")
     assert events.index("runtime_log.close") > events.index("input.release_all")
+    assert events.index("input.release_all") < events.index("input.close")
+    assert events.index("input.close") < events.index("runtime_log.close")
 
 
 def test_application_blocks_start_when_runtime_log_initialization_fails() -> None:
@@ -1306,3 +1313,11 @@ def test_application_build_services_shares_runtime_log_with_input_and_engine(tmp
     assert services.safe_input.recorder is services.runtime_log
     assert services.safe_input.backend.recorder is services.runtime_log
     assert services.engine.runtime_log is services.runtime_log
+
+
+def test_application_builds_on_screen_keyboard_input_backend(tmp_path) -> None:
+    services = Application._build_services(tmp_path)
+
+    assert isinstance(services.safe_input.backend, OnScreenKeyboardInputBackend)
+    assert services.safe_input.backend.window.recorder is services.runtime_log
+    assert services.safe_input.backend.mouse.recorder is services.runtime_log
