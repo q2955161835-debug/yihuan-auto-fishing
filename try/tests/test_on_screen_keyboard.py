@@ -6,8 +6,10 @@ from auto_fishing.model import Rect
 import pytest
 
 from auto_fishing.platform.on_screen_keyboard import (
+    KeyboardGeometry,
     OskLauncher,
     OnScreenKeyboardError,
+    OnScreenKeyboardInputBackend,
     OnScreenKeyboardWindow,
     Win32KeyboardApi,
 )
@@ -239,3 +241,165 @@ def test_osk_launcher_starts_system32_executable_without_shell() -> None:
     launcher.start()
 
     assert calls == [([r"C:\Windows\System32\osk.exe"], False)]
+
+
+class ReadyKeyboard:
+    def __init__(self) -> None:
+        self.prepared: list[tuple[Rect, Rect]] = []
+        self.closed = 0
+        self.current = KeyboardGeometry(
+            hwnd=55,
+            window_rect=Rect(0, 665, 1365, 1080),
+            client_rect=Rect(0, 0, 1350, 377),
+            key_points={"A": (160, 205), "D": (310, 205), "F": (383, 205)},
+        )
+
+    def ensure(self, monitor_rect: Rect, game_client: Rect) -> KeyboardGeometry:
+        self.prepared.append((monitor_rect, game_client))
+        return self.current
+
+    def geometry(self) -> KeyboardGeometry:
+        return self.current
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class RecordingMouse:
+    def __init__(self) -> None:
+        self.events: list[tuple[object, ...]] = []
+        self.fail_down = False
+        self.fail_up = 0
+
+    def move(self, x: int, y: int) -> None:
+        self.events.append(("move", x, y))
+
+    def down(self) -> None:
+        self.events.append(("down",))
+        if self.fail_down:
+            raise OnScreenKeyboardError("mouse down failed")
+
+    def up(self) -> None:
+        self.events.append(("up",))
+        if self.fail_up:
+            self.fail_up -= 1
+            raise OnScreenKeyboardError("mouse up failed")
+
+    def click(self, x: int, y: int) -> None:
+        self.events.append(("click", x, y))
+
+
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append({"event": name, **fields})
+
+
+def test_keyboard_backend_holds_direction_and_releases_before_switch() -> None:
+    mouse = RecordingMouse()
+    backend = OnScreenKeyboardInputBackend(window=ReadyKeyboard(), mouse=mouse)
+
+    backend.key_down("A")
+    backend.key_up("A")
+    backend.key_down("D")
+
+    assert mouse.events == [
+        ("move", 160, 205),
+        ("down",),
+        ("up",),
+        ("move", 310, 205),
+        ("down",),
+    ]
+
+
+def test_keyboard_backend_f_down_and_up_are_balanced() -> None:
+    mouse = RecordingMouse()
+    backend = OnScreenKeyboardInputBackend(window=ReadyKeyboard(), mouse=mouse)
+
+    backend.key_down("F")
+    backend.key_up("F")
+
+    assert mouse.events == [("move", 383, 205), ("down",), ("up",)]
+
+
+def test_keyboard_backend_prepares_geometry_and_reports_occlusion() -> None:
+    window = ReadyKeyboard()
+    backend = OnScreenKeyboardInputBackend(window=window, mouse=RecordingMouse())
+
+    backend.prepare(MONITOR, GAME_CLIENT)
+
+    assert window.prepared == [(MONITOR, GAME_CLIENT)]
+    assert backend.occlusion_rect() == Rect(0, 665, 1365, 1080)
+
+
+def test_keyboard_backend_cleans_up_after_mouse_down_failure() -> None:
+    mouse = RecordingMouse()
+    mouse.fail_down = True
+    backend = OnScreenKeyboardInputBackend(window=ReadyKeyboard(), mouse=mouse)
+
+    with pytest.raises(OnScreenKeyboardError, match="mouse down failed"):
+        backend.key_down("A")
+
+    assert mouse.events == [("move", 160, 205), ("down",), ("up",)]
+
+
+def test_keyboard_backend_retries_failed_key_release() -> None:
+    mouse = RecordingMouse()
+    mouse.fail_up = 1
+    backend = OnScreenKeyboardInputBackend(window=ReadyKeyboard(), mouse=mouse)
+    backend.key_down("D")
+
+    with pytest.raises(OnScreenKeyboardError, match="mouse up failed"):
+        backend.key_up("D")
+    backend.key_up("D")
+
+    assert mouse.events[-2:] == [("up",), ("up",)]
+
+
+def test_keyboard_backend_releases_direction_before_direct_click() -> None:
+    mouse = RecordingMouse()
+    backend = OnScreenKeyboardInputBackend(window=ReadyKeyboard(), mouse=mouse)
+    backend.key_down("A")
+
+    backend.click(1500, 600)
+
+    assert mouse.events[-2:] == [("up",), ("click", 1500, 600)]
+
+
+def test_keyboard_backend_closes_window_after_releasing_mouse() -> None:
+    window = ReadyKeyboard()
+    mouse = RecordingMouse()
+    backend = OnScreenKeyboardInputBackend(window=window, mouse=mouse)
+    backend.key_down("D")
+
+    backend.close()
+
+    assert mouse.events[-1] == ("up",)
+    assert window.closed == 1
+
+
+def test_keyboard_backend_records_geometry_target_and_balanced_mouse() -> None:
+    recorder = RecordingLog()
+    backend = OnScreenKeyboardInputBackend(
+        window=ReadyKeyboard(),
+        mouse=RecordingMouse(),
+        recorder=recorder,
+    )
+
+    backend.prepare(MONITOR, GAME_CLIENT)
+    backend.key_down("F")
+    backend.key_up("F")
+
+    assert recorder.events == [
+        {
+            "event": "osk.prepared",
+            "hwnd": 55,
+            "window_rect": (0, 665, 1365, 1080),
+            "client_rect": (0, 0, 1350, 377),
+        },
+        {"event": "osk.key_target", "key": "F", "x": 383, "y": 205},
+        {"event": "osk.mouse_down", "key": "F", "success": True},
+        {"event": "osk.mouse_up", "key": "F", "success": True},
+    ]

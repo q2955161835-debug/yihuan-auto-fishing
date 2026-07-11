@@ -2,7 +2,7 @@ import ctypes
 
 import pytest
 
-from auto_fishing.model import Direction
+from auto_fishing.model import Direction, Rect
 from auto_fishing.platform.input import (
     INPUT,
     KEYBDINPUT,
@@ -10,6 +10,7 @@ from auto_fishing.platform.input import (
     InputFailure,
     SafeInput,
     Win32InputBackend,
+    Win32MouseDriver,
 )
 
 
@@ -267,6 +268,32 @@ def test_win32_records_partial_send_with_windows_error(monkeypatch) -> None:
     ]
 
 
+def test_win32_mouse_driver_moves_and_holds_then_releases_left_button() -> None:
+    user32 = FakeUser32()
+    mouse = Win32MouseDriver(user32=user32)
+
+    mouse.move(200, 300)
+    mouse.down()
+    mouse.up()
+
+    assert user32.events == [
+        ("cursor", 200, 300),
+        ("send", [("mouse", 0x0002)], ctypes.sizeof(INPUT)),
+        ("send", [("mouse", 0x0004)], ctypes.sizeof(INPUT)),
+    ]
+
+
+def test_win32_mouse_driver_reports_cursor_failure_before_mouse_down() -> None:
+    user32 = FakeUser32()
+    user32.cursor_result = 0
+    mouse = Win32MouseDriver(user32=user32)
+
+    with pytest.raises(InputFailure, match="SetCursorPos failed"):
+        mouse.move(200, 300)
+
+    assert user32.events == [("cursor", 200, 300)]
+
+
 def test_win32_records_cursor_result_for_click() -> None:
     recorder = RecordingLog()
     backend = Win32InputBackend(user32=FakeUser32(), recorder=recorder)
@@ -314,6 +341,36 @@ def test_safe_input_records_mouse_click_and_cleanup_request() -> None:
         {"event": "input.request", "action": "click", "x": 200, "y": 300},
         {"event": "input.request", "action": "mouse_up"},
     ]
+
+
+def test_safe_input_delegates_keyboard_lifecycle_and_occlusion() -> None:
+    class LifecycleBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared: list[tuple[Rect, Rect]] = []
+            self.closed = 0
+
+        def prepare(self, monitor_rect: Rect, client_rect: Rect) -> None:
+            self.prepared.append((monitor_rect, client_rect))
+
+        def occlusion_rect(self) -> Rect:
+            return Rect(0, 600, 900, 1080)
+
+        def close(self) -> None:
+            self.closed += 1
+
+    backend = LifecycleBackend()
+    safe = SafeInput(backend)
+    monitor = Rect(0, 0, 1920, 1080)
+    client = Rect(0, 0, 1920, 1080)
+
+    safe.prepare(monitor, client)
+    occlusion = safe.occlusion_rect()
+    safe.close()
+
+    assert backend.prepared == [(monitor, client)]
+    assert occlusion == Rect(0, 600, 900, 1080)
+    assert backend.closed == 1
 
 
 @pytest.mark.parametrize(

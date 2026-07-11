@@ -5,7 +5,7 @@ from ctypes import wintypes
 from time import sleep as real_sleep
 from typing import Any, Callable, Protocol
 
-from auto_fishing.model import Direction
+from auto_fishing.model import Direction, Rect
 
 
 class InputFailure(RuntimeError):
@@ -65,6 +65,111 @@ class InputRecorder(Protocol):
     def event(self, name: str, **fields: Any) -> None: ...
 
 
+def _record_event(
+    recorder: InputRecorder | None,
+    name: str,
+    **fields: Any,
+) -> None:
+    if recorder is not None:
+        recorder.event(name, **fields)
+
+
+def _mouse_input(flags: int) -> INPUT:
+    mouse = MOUSEINPUT(
+        dx=0,
+        dy=0,
+        mouseData=0,
+        dwFlags=flags,
+        time=0,
+        dwExtraInfo=0,
+    )
+    return INPUT(
+        type=0,
+        union=INPUT_UNION(mi=mouse),
+    )
+
+
+def _send_inputs(
+    user32: object,
+    recorder: InputRecorder | None,
+    *inputs: INPUT,
+) -> None:
+    input_array = (INPUT * len(inputs))(*inputs)
+    requested = len(input_array)
+    sent = user32.SendInput(
+        requested,
+        input_array,
+        ctypes.sizeof(INPUT),
+    )
+    fields: dict[str, int] = {"requested": requested, "sent": int(sent)}
+    if sent != requested:
+        fields["windows_error"] = ctypes.get_last_error()
+    _record_event(recorder, "sendinput.result", **fields)
+    if sent != requested:
+        raise InputFailure(
+            f"SendInput sent {sent} of {requested}; "
+            f"Windows error {fields['windows_error']}"
+        )
+
+
+class Win32MouseDriver:
+    _MOUSEEVENTF_LEFTDOWN = 0x0002
+    _MOUSEEVENTF_LEFTUP = 0x0004
+
+    def __init__(
+        self,
+        user32: object | None = None,
+        recorder: InputRecorder | None = None,
+    ) -> None:
+        if user32 is None:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SendInput.argtypes = (
+                wintypes.UINT,
+                ctypes.POINTER(INPUT),
+                ctypes.c_int,
+            )
+            user32.SendInput.restype = wintypes.UINT
+            user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
+            user32.SetCursorPos.restype = wintypes.BOOL
+        self._user32 = user32
+        self.recorder = recorder
+
+    def move(self, x: int, y: int) -> None:
+        cursor_set = self._user32.SetCursorPos(x, y)
+        fields: dict[str, Any] = {"x": x, "y": y, "success": bool(cursor_set)}
+        if not cursor_set:
+            fields["windows_error"] = ctypes.get_last_error()
+        _record_event(self.recorder, "cursor.result", **fields)
+        if not cursor_set:
+            raise InputFailure(
+                f"SetCursorPos failed for ({x}, {y}); "
+                f"Windows error {fields['windows_error']}"
+            )
+
+    def down(self) -> None:
+        _send_inputs(
+            self._user32,
+            self.recorder,
+            _mouse_input(self._MOUSEEVENTF_LEFTDOWN),
+        )
+
+    def up(self) -> None:
+        _send_inputs(
+            self._user32,
+            self.recorder,
+            _mouse_input(self._MOUSEEVENTF_LEFTUP),
+        )
+
+    def click(self, x: int, y: int) -> None:
+        self.move(x, y)
+        _send_inputs(
+            self._user32,
+            self.recorder,
+            _mouse_input(self._MOUSEEVENTF_LEFTDOWN),
+            _mouse_input(self._MOUSEEVENTF_LEFTUP),
+        )
+
+
 class SafeInput:
     def __init__(
         self,
@@ -97,6 +202,22 @@ class SafeInput:
             self.sleep(0.05)
         finally:
             self._up("F")
+
+    def prepare(self, monitor_rect: Rect, client_rect: Rect) -> None:
+        prepare = getattr(self.backend, "prepare", None)
+        if prepare is not None:
+            prepare(monitor_rect, client_rect)
+
+    def occlusion_rect(self) -> Rect | None:
+        read_occlusion = getattr(self.backend, "occlusion_rect", None)
+        if read_occlusion is None:
+            return None
+        return read_occlusion()
+
+    def close(self) -> None:
+        close = getattr(self.backend, "close", None)
+        if close is not None:
+            close()
 
     def set_direction(self, direction: Direction) -> None:
         desired = {
@@ -190,6 +311,7 @@ class Win32InputBackend:
             user32.SetCursorPos.restype = wintypes.BOOL
         self._user32 = user32
         self.recorder = recorder
+        self._mouse = Win32MouseDriver(user32=user32, recorder=recorder)
 
     def key_down(self, key: str) -> None:
         self._send_key(key, key_up=False)
@@ -198,23 +320,10 @@ class Win32InputBackend:
         self._send_key(key, key_up=True)
 
     def click(self, x: int, y: int) -> None:
-        cursor_set = self._user32.SetCursorPos(x, y)
-        cursor_fields: dict[str, Any] = {"x": x, "y": y, "success": bool(cursor_set)}
-        if not cursor_set:
-            cursor_fields["windows_error"] = ctypes.get_last_error()
-        self._record("cursor.result", **cursor_fields)
-        if not cursor_set:
-            raise InputFailure(
-                f"SetCursorPos failed for ({x}, {y}); "
-                f"Windows error {cursor_fields['windows_error']}"
-            )
-        self._send_inputs(
-            self._mouse_input(self._MOUSEEVENTF_LEFTDOWN),
-            self._mouse_input(self._MOUSEEVENTF_LEFTUP),
-        )
+        self._mouse.click(x, y)
 
     def mouse_up(self) -> None:
-        self._send_inputs(self._mouse_input(self._MOUSEEVENTF_LEFTUP))
+        self._mouse.up()
 
     def _send_key(self, key: str, *, key_up: bool) -> None:
         normalized = key.upper()
@@ -239,38 +348,8 @@ class Win32InputBackend:
             )
         )
 
-    def _mouse_input(self, flags: int) -> INPUT:
-        mouse = MOUSEINPUT(
-            dx=0,
-            dy=0,
-            mouseData=0,
-            dwFlags=flags,
-            time=0,
-            dwExtraInfo=0,
-        )
-        return INPUT(
-            type=self._INPUT_MOUSE,
-            union=INPUT_UNION(mi=mouse),
-        )
-
     def _send_inputs(self, *inputs: INPUT) -> None:
-        input_array = (INPUT * len(inputs))(*inputs)
-        requested = len(input_array)
-        sent = self._user32.SendInput(
-            requested,
-            input_array,
-            ctypes.sizeof(INPUT),
-        )
-        fields: dict[str, int] = {"requested": requested, "sent": int(sent)}
-        if sent != requested:
-            fields["windows_error"] = ctypes.get_last_error()
-        self._record("sendinput.result", **fields)
-        if sent != requested:
-            raise InputFailure(
-                f"SendInput sent {sent} of {requested}; "
-                f"Windows error {fields['windows_error']}"
-            )
+        _send_inputs(self._user32, self.recorder, *inputs)
 
     def _record(self, name: str, **fields: Any) -> None:
-        if self.recorder is not None:
-            self.recorder.event(name, **fields)
+        _record_event(self.recorder, name, **fields)

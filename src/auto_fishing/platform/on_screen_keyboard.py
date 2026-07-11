@@ -214,3 +214,137 @@ class OnScreenKeyboardWindow:
             client_rect=client_rect,
             key_points=key_points,
         )
+
+
+class OnScreenKeyboardInputBackend:
+    def __init__(
+        self,
+        *,
+        window: OnScreenKeyboardWindow,
+        mouse: Any,
+        recorder: Any | None = None,
+    ) -> None:
+        self.window = window
+        self.mouse = mouse
+        self.recorder = recorder
+        self._held_key: str | None = None
+        self._geometry: KeyboardGeometry | None = None
+
+    def prepare(self, monitor_rect: Rect, game_client: Rect) -> None:
+        self._geometry = self.window.ensure(monitor_rect, game_client)
+        self._record(
+            "osk.prepared",
+            hwnd=self._geometry.hwnd,
+            window_rect=self._rect_tuple(self._geometry.window_rect),
+            client_rect=self._rect_tuple(self._geometry.client_rect),
+        )
+
+    def occlusion_rect(self) -> Rect | None:
+        if self._geometry is None:
+            return None
+        self._geometry = self.window.geometry()
+        return self._geometry.window_rect
+
+    def key_down(self, key: str) -> None:
+        normalized = key.upper()
+        if normalized not in _KEY_CENTERS:
+            raise ValueError(f"unsupported key: {key!r}")
+        if self._held_key == normalized:
+            return
+        if self._held_key is not None:
+            raise OnScreenKeyboardError(
+                f"屏幕键盘仍按住 {self._held_key}，不能按下 {normalized}"
+            )
+
+        geometry = self.window.geometry()
+        self._geometry = geometry
+        point = geometry.key_points[normalized]
+        self._record(
+            "osk.key_target",
+            key=normalized,
+            x=point[0],
+            y=point[1],
+        )
+        self.mouse.move(*point)
+        try:
+            self.mouse.down()
+        except Exception as down_error:
+            self._record(
+                "osk.mouse_down",
+                key=normalized,
+                success=False,
+                error=str(down_error),
+            )
+            try:
+                self.mouse.up()
+            except Exception as release_error:
+                raise OnScreenKeyboardError(
+                    f"{down_error}; 清理鼠标抬起失败: {release_error}"
+                ) from release_error
+            raise
+        self._record(
+            "osk.mouse_down",
+            key=normalized,
+            success=True,
+        )
+        self._held_key = normalized
+
+    def key_up(self, key: str) -> None:
+        normalized = key.upper()
+        if self._held_key != normalized:
+            return
+        try:
+            self.mouse.up()
+        except Exception as error:
+            self._record(
+                "osk.mouse_up",
+                key=normalized,
+                success=False,
+                error=str(error),
+            )
+            raise
+        self._record(
+            "osk.mouse_up",
+            key=normalized,
+            success=True,
+        )
+        self._held_key = None
+
+    def click(self, x: int, y: int) -> None:
+        self._release_held()
+        self.mouse.click(x, y)
+
+    def mouse_up(self) -> None:
+        self.mouse.up()
+        self._held_key = None
+
+    def close(self) -> None:
+        try:
+            self._release_held()
+        finally:
+            self.window.close()
+
+    def _release_held(self) -> None:
+        if self._held_key is None:
+            return
+        key = self._held_key
+        try:
+            self.mouse.up()
+        except Exception as error:
+            self._record(
+                "osk.mouse_up",
+                key=key,
+                success=False,
+                error=str(error),
+            )
+            raise
+        self._record("osk.mouse_up", key=key, success=True)
+        self._held_key = None
+
+    def _record(self, name: str, **fields: Any) -> None:
+        if self.recorder is not None:
+            self.recorder.event(name, **fields)
+
+    @staticmethod
+    def _rect_tuple(rect: Rect) -> tuple[int, int, int, int]:
+        return rect.left, rect.top, rect.right, rect.bottom
