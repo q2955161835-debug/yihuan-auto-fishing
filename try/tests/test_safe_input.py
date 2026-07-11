@@ -34,6 +34,14 @@ class FakeBackend:
         self.events.append(("mouse_up",))
 
 
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append({"event": name, **fields})
+
+
 def test_direction_switch_releases_old_key_first() -> None:
     backend = FakeBackend()
     safe = SafeInput(backend, sleep=lambda _: None)
@@ -152,6 +160,17 @@ def test_win32_keyboard_uses_scan_codes_and_balanced_flags() -> None:
     ]
 
 
+def test_win32_records_sendinput_success_without_stale_error_code() -> None:
+    recorder = RecordingLog()
+    backend = Win32InputBackend(user32=FakeUser32(), recorder=recorder)
+
+    backend.key_down("F")
+
+    assert recorder.events == [
+        {"event": "sendinput.result", "requested": 1, "sent": 1}
+    ]
+
+
 def test_win32_click_moves_cursor_then_sends_left_down_and_up() -> None:
     user32 = FakeUser32()
     backend = Win32InputBackend(user32=user32)
@@ -226,6 +245,75 @@ def test_win32_raises_when_set_cursor_pos_fails() -> None:
         backend.click(200, 300)
 
     assert user32.events == [("cursor", 200, 300)]
+
+
+def test_win32_records_partial_send_with_windows_error(monkeypatch) -> None:
+    recorder = RecordingLog()
+    user32 = FakeUser32()
+    user32.send_result = 0
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+    backend = Win32InputBackend(user32=user32, recorder=recorder)
+
+    with pytest.raises(InputFailure, match="SendInput sent 0 of 1"):
+        backend.key_down("F")
+
+    assert recorder.events == [
+        {
+            "event": "sendinput.result",
+            "requested": 1,
+            "sent": 0,
+            "windows_error": 5,
+        }
+    ]
+
+
+def test_win32_records_cursor_result_for_click() -> None:
+    recorder = RecordingLog()
+    backend = Win32InputBackend(user32=FakeUser32(), recorder=recorder)
+
+    backend.click(200, 300)
+
+    assert recorder.events[0] == {
+        "event": "cursor.result",
+        "x": 200,
+        "y": 300,
+        "success": True,
+    }
+
+
+def test_safe_input_records_tap_and_direction_requests() -> None:
+    recorder = RecordingLog()
+    safe = SafeInput(FakeBackend(), sleep=lambda _: None, recorder=recorder)
+
+    safe.tap_f()
+    safe.set_direction(Direction.RIGHT)
+    safe.release_all()
+
+    assert recorder.events == [
+        {"event": "input.request", "action": "tap", "key": "F"},
+        {"event": "input.request", "action": "key_down", "key": "F"},
+        {"event": "input.request", "action": "key_up", "key": "F"},
+        {"event": "input.request", "action": "key_down", "key": "D"},
+        {"event": "input.request", "action": "key_up", "key": "D"},
+    ]
+
+
+def test_safe_input_records_mouse_click_and_cleanup_request() -> None:
+    class FailingClickBackend(FakeBackend):
+        def click(self, x: int, y: int) -> None:
+            super().click(x, y)
+            raise InputFailure("click failed")
+
+    recorder = RecordingLog()
+    safe = SafeInput(FailingClickBackend(), sleep=lambda _: None, recorder=recorder)
+
+    with pytest.raises(InputFailure, match="click failed"):
+        safe.click(200, 300)
+
+    assert recorder.events == [
+        {"event": "input.request", "action": "click", "x": 200, "y": 300},
+        {"event": "input.request", "action": "mouse_up"},
+    ]
 
 
 @pytest.mark.parametrize(
