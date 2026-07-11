@@ -40,6 +40,8 @@ class RecordingInput:
         self.events: list[object] = []
         self.failure: Exception | None = None
         self.prepared: list[tuple[Rect, Rect]] = []
+        self.occlusion: Rect | None = None
+        self.occlusion_error: Exception | None = None
 
     def _record(self, event: object) -> None:
         if self.failure is not None:
@@ -61,6 +63,11 @@ class RecordingInput:
 
     def prepare(self, monitor_rect: Rect, client_rect: Rect) -> None:
         self.prepared.append((monitor_rect, client_rect))
+
+    def occlusion_rect(self) -> Rect | None:
+        if self.occlusion_error is not None:
+            raise self.occlusion_error
+        return self.occlusion
 
 
 class ReleaseFailingInput(RecordingInput):
@@ -358,13 +365,21 @@ class ScriptedRecognizer:
         self.observations = list(observations or [])
         self.error = error
         self.frames: list[np.ndarray] = []
+        self.occlusions: list[Rect | None] = []
         self.observed = threading.Event()
 
     def set_bite_baseline(self, _frame: np.ndarray) -> None:
         return None
 
-    def observe(self, frame: np.ndarray, _timestamp: float) -> SceneObservation:
+    def observe(
+        self,
+        frame: np.ndarray,
+        _timestamp: float,
+        *,
+        occlusion: Rect | None = None,
+    ) -> SceneObservation:
         self.frames.append(frame)
+        self.occlusions.append(occlusion)
         self.observed.set()
         if self.error is not None:
             raise self.error
@@ -416,9 +431,15 @@ class OrderedResumeRecognizer(ScriptedRecognizer):
         self.resume_frames = 0
         self.resume_mode = False
 
-    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+    def observe(
+        self,
+        frame: np.ndarray,
+        timestamp: float,
+        *,
+        occlusion: Rect | None = None,
+    ) -> SceneObservation:
         if not self.resume_mode:
-            return super().observe(frame, timestamp)
+            return super().observe(frame, timestamp, occlusion=occlusion)
         self.resume_frames += 1
         self.events.append(f"frame-{self.resume_frames}")
         if self.resume_frames < 3:
@@ -434,11 +455,17 @@ class BarrierRecognizer(ScriptedRecognizer):
         self.allow = threading.Event()
         self.returned = threading.Event()
 
-    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+    def observe(
+        self,
+        frame: np.ndarray,
+        timestamp: float,
+        *,
+        occlusion: Rect | None = None,
+    ) -> SceneObservation:
         if self.block:
             self.entered.set()
             assert self.allow.wait(timeout=1)
-        result = super().observe(frame, timestamp)
+        result = super().observe(frame, timestamp, occlusion=occlusion)
         self.returned.set()
         return result
 
@@ -449,8 +476,14 @@ class CapturedBarrierRecognizer(ScriptedRecognizer):
         self.entered = threading.Event()
         self.allow = threading.Event()
 
-    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
-        result = super().observe(frame, timestamp)
+    def observe(
+        self,
+        frame: np.ndarray,
+        timestamp: float,
+        *,
+        occlusion: Rect | None = None,
+    ) -> SceneObservation:
+        result = super().observe(frame, timestamp, occlusion=occlusion)
         self.entered.set()
         assert self.allow.wait(timeout=1)
         return result
@@ -467,7 +500,13 @@ class AbaRecognizer(ScriptedRecognizer):
         self.allow_b = threading.Event()
         self.b_returned = threading.Event()
 
-    def observe(self, frame: np.ndarray, timestamp: float) -> SceneObservation:
+    def observe(
+        self,
+        frame: np.ndarray,
+        timestamp: float,
+        *,
+        occlusion: Rect | None = None,
+    ) -> SceneObservation:
         if self.block_a:
             self.block_a = False
             result = SceneObservation(ready=True)
@@ -480,7 +519,7 @@ class AbaRecognizer(ScriptedRecognizer):
             assert self.allow_b.wait(timeout=1)
             self.b_returned.set()
             return SceneObservation(result=True)
-        return super().observe(frame, timestamp)
+        return super().observe(frame, timestamp, occlusion=occlusion)
 
 
 class SnapshotBarrierCore:
@@ -665,6 +704,40 @@ def test_engine_records_observation_and_state_for_each_processed_frame(tmp_path)
     finally:
         source.allow_second_latest.set()
         engine.shutdown()
+
+
+def test_engine_passes_client_relative_keyboard_occlusion_to_vision(tmp_path) -> None:
+    input_service = RecordingInput()
+    input_service.occlusion = Rect(0, 500, 900, 1080)
+    recognizer = ScriptedRecognizer()
+    engine, _core, _input, _window, _source = make_engine(
+        tmp_path,
+        input_service=input_service,
+        recognizer=recognizer,
+    )
+
+    engine.start(1)
+    wait_until(lambda: recognizer.observed.is_set())
+    engine.shutdown()
+
+    assert recognizer.occlusions[0] == Rect(0, 500, 900, 720)
+
+
+def test_engine_pauses_with_e_osk_when_keyboard_geometry_disappears(tmp_path) -> None:
+    input_service = RecordingInput()
+    input_service.occlusion_error = InputFailure("屏幕键盘窗口已失效")
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        input_service=input_service,
+    )
+
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+    engine.shutdown()
+
+    assert core.pause_code == "E_OSK"
+    assert "屏幕键盘窗口已失效" in core.snapshot.error
+    assert input_service.events[-1] == "release"
 
 
 def test_engine_pauses_with_e_logging_and_releases_inputs_when_runtime_log_fails(

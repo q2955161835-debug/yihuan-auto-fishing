@@ -38,7 +38,7 @@ class FakeKeyboardApi:
         self.find_results = list(find_results)
         self._window_rect = window_rect
         self._client_rect = client_rect
-        self.positioned: list[tuple[int, Rect]] = []
+        self.positioned: list[tuple[int, Rect, int]] = []
         self.closed: list[int] = []
 
     def find_window(self) -> int:
@@ -46,8 +46,13 @@ class FakeKeyboardApi:
             return self.find_results.pop(0)
         return self.find_results[0]
 
-    def position_bottom_left(self, hwnd: int, monitor_rect: Rect) -> None:
-        self.positioned.append((hwnd, monitor_rect))
+    def position_bottom_left(
+        self,
+        hwnd: int,
+        monitor_rect: Rect,
+        max_width: int,
+    ) -> None:
+        self.positioned.append((hwnd, monitor_rect, max_width))
 
     def validate_window(self, hwnd: int) -> None:
         assert hwnd in {55, 77}
@@ -76,7 +81,7 @@ def test_ensure_reuses_existing_keyboard_without_owning_it() -> None:
 
     assert geometry.hwnd == 55
     assert launcher.started == 0
-    assert api.positioned == [(55, MONITOR)]
+    assert api.positioned == [(55, MONITOR, 1536)]
     assert api.closed == []
 
 
@@ -210,11 +215,11 @@ def test_win32_api_reads_valid_keyboard_geometry_and_positions_bottom_left() -> 
 
     hwnd = api.find_window()
     api.validate_window(hwnd)
-    api.position_bottom_left(hwnd, Rect(0, 0, 1920, 1080))
+    api.position_bottom_left(hwnd, Rect(0, 0, 1920, 1080), 1000)
 
     assert api.window_rect(hwnd) == Rect(80, 80, 1445, 495)
     assert api.client_rect_on_screen(hwnd) == Rect(87, 110, 1437, 487)
-    assert user32.positioned == [(55, 0, 665, 1365, 415, 0x0040)]
+    assert user32.positioned == [(55, 0, 776, 1000, 304, 0x0040)]
 
 
 def test_win32_api_closes_owned_keyboard_with_wm_close() -> None:
@@ -241,6 +246,26 @@ def test_osk_launcher_starts_system32_executable_without_shell() -> None:
     launcher.start()
 
     assert calls == [([r"C:\Windows\System32\osk.exe"], False)]
+
+
+@pytest.mark.parametrize(
+    "window_rect",
+    [
+        Rect(400, 0, 1400, 400),
+        Rect(0, 650, 1800, 1080),
+    ],
+)
+def test_ensure_rejects_keyboard_over_critical_recognition_regions(
+    window_rect: Rect,
+) -> None:
+    keyboard = OnScreenKeyboardWindow(
+        api=FakeKeyboardApi([55], window_rect=window_rect),
+        launcher=FakeLauncher(),
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(OnScreenKeyboardError, match="遮挡关键识别区域"):
+        keyboard.ensure(MONITOR, Rect(0, 0, 1920, 1080))
 
 
 class ReadyKeyboard:

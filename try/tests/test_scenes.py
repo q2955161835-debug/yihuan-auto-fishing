@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 import pytest
+from pathlib import Path
 
+from auto_fishing.model import Rect
 from auto_fishing.vision.scenes import BiteDetector, SceneRecognizer
 
 
@@ -19,10 +21,18 @@ def bite_frame() -> np.ndarray:
 
 def result_frame(width: int = 1280, height: int = 720, *, ready_icon: bool = False) -> np.ndarray:
     image = np.full((height, width, 3), 25, dtype=np.uint8)
+    radius = max(12, round(min(width, height) * 0.20))
     cv2.circle(
         image,
         (round(width * 0.50), round(height * 0.50)),
-        max(12, round(min(width, height) * 0.20)),
+        round(radius * 1.08),
+        (240, 240, 240),
+        -1,
+    )
+    cv2.circle(
+        image,
+        (round(width * 0.50), round(height * 0.50)),
+        radius,
         BLUE_BGR,
         -1,
     )
@@ -74,6 +84,26 @@ def add_bite_to_ready_roi(image: np.ndarray) -> None:
         (255, 255, 255),
         -1,
     )
+
+
+def screen_keyboard_patch_frame() -> tuple[np.ndarray, Rect]:
+    image = np.full((720, 1280, 3), 180, dtype=np.uint8)
+    occlusion = Rect(0, 330, 920, 720)
+    image[occlusion.top : occlusion.bottom, occlusion.left : occlusion.right] = 25
+    cv2.circle(image, (620, 520), 150, BLUE_BGR, -1)
+    return image, occlusion
+
+
+def dark_blue_night_frame() -> np.ndarray:
+    image = np.full((720, 1280, 3), 25, dtype=np.uint8)
+    cv2.rectangle(image, (320, 160), (470, 650), BLUE_BGR, -1)
+    cv2.rectangle(image, (810, 180), (950, 620), BLUE_BGR, -1)
+    return image
+
+
+def real_result_reference() -> np.ndarray:
+    path = Path(__file__).resolve().parents[2] / "流程截图" / "第四步点击空白处关闭.jpg"
+    return cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
 
 
 def test_bite_requires_two_changed_frames_and_blue_shape_cross_feature() -> None:
@@ -149,6 +179,25 @@ def test_result_requires_three_consecutive_frames() -> None:
     assert observation.result_candidate is True
     assert observation.result is True
     assert observation.progress is None
+
+
+def test_dark_blue_night_scene_is_not_result_candidate() -> None:
+    recognizer = SceneRecognizer()
+
+    observation = recognizer.observe(dark_blue_night_frame(), 1.0)
+
+    assert observation.result_candidate is False
+
+
+def test_real_result_reference_is_detected_after_three_frames() -> None:
+    recognizer = SceneRecognizer()
+    frame = real_result_reference()
+
+    recognizer.observe(frame, 1.0)
+    recognizer.observe(frame, 1.1)
+    observation = recognizer.observe(frame, 1.2)
+
+    assert observation.result is True
 
 
 def test_result_confirmation_resets_when_candidate_disappears() -> None:
@@ -246,3 +295,24 @@ def test_result_and_ready_rois_scale_with_client_resolution(size: tuple[int, int
     assert result.ready is False
     assert ready.ready is True
     assert ready.result is False
+
+
+def test_result_ratios_ignore_screen_keyboard_occlusion() -> None:
+    frame, occlusion = screen_keyboard_patch_frame()
+    recognizer = SceneRecognizer()
+
+    observation = recognizer.observe(frame, 1.0, occlusion=occlusion)
+
+    assert observation.result_candidate is False
+
+
+def test_result_rejects_too_few_unoccluded_pixels() -> None:
+    frame = result_frame()
+    recognizer = SceneRecognizer()
+
+    with pytest.raises(ValueError, match="结算识别有效像素不足"):
+        recognizer.observe(
+            frame,
+            1.0,
+            occlusion=Rect(0, 0, frame.shape[1], frame.shape[0]),
+        )

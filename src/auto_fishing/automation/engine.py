@@ -819,8 +819,33 @@ class AutomationEngine:
 
                 try:
                     client_frame = self._crop_client(packet.frame, bound)
+                except Exception as error:
+                    self._pause(
+                        "E_VISION",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
+
+                try:
+                    occlusion = self._client_occlusion(bound)
+                except Exception as error:
+                    self._pause(
+                        "E_OSK",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
+
+                try:
                     observation = self.scene_recognizer.observe(
-                        client_frame, packet.timestamp
+                        client_frame,
+                        packet.timestamp,
+                        occlusion=occlusion,
                     )
                 except Exception as error:
                     self._pause(
@@ -1205,3 +1230,21 @@ class AutomationEngine:
         if not (0 <= left < right <= width and 0 <= top < bottom <= height):
             raise WindowActionError("客户区超出当前截屏边界")
         return frame[top:bottom, left:right].copy()
+
+    def _client_occlusion(self, bound: Any) -> Rect | None:
+        screen_rect = self.core.input_service.occlusion_rect()
+        if screen_rect is None:
+            return None
+        client = bound.client_rect
+        left = max(screen_rect.left, client.left)
+        top = max(screen_rect.top, client.top)
+        right = min(screen_rect.right, client.right)
+        bottom = min(screen_rect.bottom, client.bottom)
+        if left >= right or top >= bottom:
+            return None
+        return Rect(
+            left - client.left,
+            top - client.top,
+            right - client.left,
+            bottom - client.top,
+        )

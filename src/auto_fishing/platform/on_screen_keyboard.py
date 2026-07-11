@@ -10,6 +10,7 @@ from time import sleep as real_sleep
 from typing import Any, Callable
 
 from auto_fishing.model import Rect
+from auto_fishing.vision.regions import READY_ROI, TOP_ROI
 
 
 class OnScreenKeyboardError(RuntimeError):
@@ -69,15 +70,22 @@ class Win32KeyboardApi:
         if class_name.value != _OSK_CLASS:
             raise OnScreenKeyboardError("Windows 屏幕键盘窗口类别不匹配")
 
-    def position_bottom_left(self, hwnd: int, monitor_rect: Rect) -> None:
+    def position_bottom_left(
+        self,
+        hwnd: int,
+        monitor_rect: Rect,
+        max_width: int,
+    ) -> None:
         current = self.window_rect(hwnd)
+        width = min(current.width, max_width)
+        height = round(current.height * width / current.width)
         positioned = self.user32.SetWindowPos(
             hwnd,
             _HWND_TOPMOST,
             monitor_rect.left,
-            monitor_rect.bottom - current.height,
-            current.width,
-            current.height,
+            monitor_rect.bottom - height,
+            width,
+            height,
             _SWP_SHOWWINDOW,
         )
         if not positioned:
@@ -175,10 +183,15 @@ class OnScreenKeyboardWindow:
         if not hwnd:
             raise OnScreenKeyboardError("启动 Windows 屏幕键盘超时")
 
-        self.api.position_bottom_left(hwnd, monitor_rect)
+        self.api.position_bottom_left(
+            hwnd,
+            monitor_rect,
+            round(game_client.width * 0.80),
+        )
         self.api.validate_window(hwnd)
         self._hwnd = hwnd
         self._geometry = self._read_geometry(hwnd)
+        self._validate_placement(self._geometry, monitor_rect, game_client)
         return self._geometry
 
     def geometry(self) -> KeyboardGeometry:
@@ -214,6 +227,27 @@ class OnScreenKeyboardWindow:
             client_rect=client_rect,
             key_points=key_points,
         )
+
+    @staticmethod
+    def _validate_placement(
+        geometry: KeyboardGeometry,
+        monitor_rect: Rect,
+        game_client: Rect,
+    ) -> None:
+        window = geometry.window_rect
+        if not (
+            monitor_rect.left <= window.left
+            and monitor_rect.top <= window.top
+            and window.right <= monitor_rect.right
+            and window.bottom <= monitor_rect.bottom
+        ):
+            raise OnScreenKeyboardError("Windows 屏幕键盘超出目标显示器")
+        critical = (
+            TOP_ROI.to_pixels(game_client),
+            READY_ROI.to_pixels(game_client),
+        )
+        if any(_intersects(window, region) for region in critical):
+            raise OnScreenKeyboardError("Windows 屏幕键盘遮挡关键识别区域")
 
 
 class OnScreenKeyboardInputBackend:
@@ -348,3 +382,10 @@ class OnScreenKeyboardInputBackend:
     @staticmethod
     def _rect_tuple(rect: Rect) -> tuple[int, int, int, int]:
         return rect.left, rect.top, rect.right, rect.bottom
+
+
+def _intersects(first: Rect, second: Rect) -> bool:
+    return (
+        max(first.left, second.left) < min(first.right, second.right)
+        and max(first.top, second.top) < min(first.bottom, second.bottom)
+    )
