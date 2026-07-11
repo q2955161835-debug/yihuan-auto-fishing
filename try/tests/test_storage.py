@@ -1,10 +1,15 @@
 from datetime import datetime, timedelta, timezone
 import json
+import os
+import threading
 
+import cv2
 import numpy as np
 import pytest
 
+from auto_fishing.model import FishingState, RuntimeSnapshot, SceneObservation
 from auto_fishing.storage.diagnostics import DiagnosticsStore
+from auto_fishing.storage.runtime_logging import RuntimeLogError, RuntimeLogStore
 from auto_fishing.storage.settings import AppSettings, SettingsStore
 
 
@@ -86,3 +91,81 @@ def test_diagnostics_same_timestamp_and_code_create_distinct_groups(tmp_path):
     assert first != second
     assert len(list((tmp_path / "diagnostics").glob("*.png"))) == 2
     assert len(list((tmp_path / "diagnostics").glob("*.json"))) == 2
+
+
+def test_runtime_log_writes_jsonl_and_480px_jpeg(tmp_path):
+    store = RuntimeLogStore(tmp_path / "runs", queue_size=3)
+    run_dir = store.start()
+    store.event("application.started", pid=123)
+    store.record_frame(
+        np.zeros((1080, 1920, 3), dtype=np.uint8),
+        observation=SceneObservation(ready=True),
+        state_before=FishingState.READY,
+        snapshot=RuntimeSnapshot(FishingState.WAIT_BITE, 0, 1, 30.0),
+        frame_timestamp=10.0,
+        now_monotonic=10.01,
+    )
+    store.close()
+
+    entries = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text("utf-8").splitlines()
+    ]
+    image = cv2.imread(str(run_dir / "frames" / "00000001.jpg"))
+    assert entries[0]["event"] == "application.started"
+    assert entries[-1]["event"] == "frame.processed"
+    assert max(image.shape[:2]) == 480
+
+
+def test_runtime_log_cleanup_keeps_newest_thirty_runs(tmp_path):
+    root = tmp_path / "runs"
+    base = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    for index in range(31):
+        run = root / f"run-{index:02d}"
+        run.mkdir(parents=True)
+        (run / "events.jsonl").write_text("", "utf-8")
+        stamp = (base + timedelta(seconds=index)).timestamp()
+        os.utime(run, (stamp, stamp))
+
+    RuntimeLogStore(root).cleanup()
+
+    assert sorted(path.name for path in root.iterdir()) == [
+        f"run-{index:02d}" for index in range(1, 31)
+    ]
+
+
+def test_runtime_log_cleanup_never_traverses_outside_root(tmp_path):
+    root = tmp_path / "runs"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("keep", "utf-8")
+    (root / "not-a-run.txt").write_text("ignore", "utf-8")
+
+    RuntimeLogStore(root).cleanup()
+
+    assert sentinel.read_text("utf-8") == "keep"
+    assert (root / "not-a-run.txt").is_file()
+
+
+def test_runtime_log_queue_full_surfaces_runtime_log_error(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingStore(RuntimeLogStore):
+        def _write_item(self, item):
+            entered.set()
+            assert release.wait(timeout=1)
+            super()._write_item(item)
+
+    store = BlockingStore(tmp_path / "runs", queue_size=1)
+    store.start()
+    store.event("first")
+    assert entered.wait(timeout=1)
+    store.event("second")
+    store.event("third")
+    with pytest.raises(RuntimeLogError, match="日志队列已满"):
+        store.raise_if_failed()
+    release.set()
+    store.close()

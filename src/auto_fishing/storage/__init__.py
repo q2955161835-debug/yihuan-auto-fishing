@@ -1,1 +1,5 @@
-"""本地设置与诊断文件存储。"""
+"""本地设置、诊断与完整运行记录存储。"""
+
+from .runtime_logging import RuntimeLogError, RuntimeLogStore
+
+__all__ = ["RuntimeLogError", "RuntimeLogStore"]
