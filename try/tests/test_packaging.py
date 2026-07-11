@@ -93,3 +93,12 @@ def test_smoke_script_only_observes_and_stops_launcher_process_tree():
     assert "Get-ExecutableProcesses" not in script
     assert "发布物仍有残留进程" in script
     assert "SMOKE_OK" in script
+
+
+def test_smoke_script_polls_for_onefile_child_window_until_startup_deadline():
+    script = (ROOT / "try" / "smoke_exe.ps1").read_text(encoding="utf-8-sig")
+
+    assert "$StartupDeadline = [DateTime]::UtcNow.AddSeconds(15)" in script
+    assert "$ResponsiveWindows.Count -eq 0 -and" in script
+    assert "[DateTime]::UtcNow -lt $StartupDeadline" in script
+    assert "Start-Sleep -Seconds 3" not in script

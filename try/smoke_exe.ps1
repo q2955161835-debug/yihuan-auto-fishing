@@ -35,30 +35,37 @@ function Get-OwnedProcesses {
 }
 
 try {
-    Start-Sleep -Seconds 3
-    $Launcher.Refresh()
-    $Running = Get-OwnedProcesses
-    if ($Running.Count -eq 0) {
-        if ($Launcher.HasExited) {
-            throw "发布物提前退出，退出码 $($Launcher.ExitCode)"
+    $StartupDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    $ResponsiveWindows = @()
+    do {
+        Start-Sleep -Milliseconds 200
+        $Launcher.Refresh()
+        $Running = Get-OwnedProcesses
+        if ($Running.Count -eq 0) {
+            if ($Launcher.HasExited) {
+                throw "发布物提前退出，退出码 $($Launcher.ExitCode)"
+            }
+            continue
         }
-        throw '未找到发布物进程'
-    }
 
-    $ResponsiveWindows = @(
-        foreach ($Item in $Running) {
-            $Process = Get-Process -Id $Item.Id -ErrorAction SilentlyContinue
-            if ($null -ne $Process) {
-                $Process.Refresh()
-                if (
-                    -not $Process.HasExited -and
-                    $Process.Responding -and
-                    $Process.MainWindowHandle -ne 0
-                ) {
-                    $Process
+        $ResponsiveWindows = @(
+            foreach ($Item in $Running) {
+                $Process = Get-Process -Id $Item.Id -ErrorAction SilentlyContinue
+                if ($null -ne $Process) {
+                    $Process.Refresh()
+                    if (
+                        -not $Process.HasExited -and
+                        $Process.Responding -and
+                        $Process.MainWindowHandle -ne 0
+                    ) {
+                        $Process
+                    }
                 }
             }
-        }
+        )
+    } while (
+        $ResponsiveWindows.Count -eq 0 -and
+        [DateTime]::UtcNow -lt $StartupDeadline
     )
     if ($ResponsiveWindows.Count -eq 0) {
         throw '发布物窗口无响应'
