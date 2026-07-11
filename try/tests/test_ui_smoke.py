@@ -1058,6 +1058,27 @@ class AppDiagnostics:
         self.events.append("diagnostics.cleanup")
 
 
+class AppRuntimeLog:
+    def __init__(self, events: list[object]) -> None:
+        self.events = events
+
+    def start(self) -> Path:
+        self.events.append("runtime_log.start")
+        return Path("runs")
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append(("runtime_log.event", name, fields))
+
+    def close(self) -> None:
+        self.events.append("runtime_log.close")
+
+
+class FailingAppRuntimeLog(AppRuntimeLog):
+    def start(self) -> Path:
+        self.events.append("runtime_log.start")
+        raise OSError("磁盘不可写")
+
+
 class AppMainWindow:
     def __init__(self, root, controller, settings, events) -> None:
         self.events = events
@@ -1110,6 +1131,61 @@ def test_application_wires_f8_and_always_cleans_up_resources() -> None:
         "input.release_all",
         "root.destroy",
     ]
+
+
+def test_application_starts_and_closes_runtime_log() -> None:
+    events: list[object] = []
+    root = AppRoot(events)
+    runtime_log = AppRuntimeLog(events)
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=AppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=runtime_log,
+    )
+
+    Application(
+        services=services,
+        root_factory=lambda: root,
+        main_window_factory=lambda root, controller, settings: AppMainWindow(
+            root, controller, settings, events
+        ),
+    ).run()
+
+    assert "runtime_log.start" in events
+    assert any(
+        event[0:2] == ("runtime_log.event", "application.started")
+        for event in events
+        if isinstance(event, tuple)
+    )
+    assert events.index("runtime_log.start") < events.index("window")
+    assert events.index("runtime_log.close") > events.index("input.release_all")
+
+
+def test_application_blocks_start_when_runtime_log_initialization_fails() -> None:
+    events: list[object] = []
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=AppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=FailingAppRuntimeLog(events),
+    )
+
+    Application(
+        services=services,
+        root_factory=lambda: AppRoot(events),
+        main_window_factory=lambda root, controller, settings: AppMainWindow(
+            root, controller, settings, events
+        ),
+    ).run()
+
+    assert ("block_start", "运行日志初始化失败：磁盘不可写") in events
 
 
 def test_application_reports_capture_exclusion_failure_without_blocking_start() -> None:
@@ -1222,3 +1298,11 @@ def test_application_builds_settings_store_at_specified_config_path(tmp_path) ->
     services = Application._build_services(tmp_path)
 
     assert services.settings.path == tmp_path / "config.json"
+
+
+def test_application_build_services_shares_runtime_log_with_input_and_engine(tmp_path) -> None:
+    services = Application._build_services(tmp_path)
+
+    assert services.safe_input.recorder is services.runtime_log
+    assert services.safe_input.backend.recorder is services.runtime_log
+    assert services.engine.runtime_log is services.runtime_log

@@ -25,6 +25,7 @@ from auto_fishing.model import (
 from auto_fishing.platform.input import InputFailure
 from auto_fishing.platform.windowing import BoundWindow
 from auto_fishing.storage.diagnostics import DiagnosticsStore
+from auto_fishing.storage.runtime_logging import RuntimeLogError
 from auto_fishing.vision.progress import ProgressController
 from auto_fishing.vision.scenes import SceneRecognizer
 
@@ -361,6 +362,42 @@ class ScriptedRecognizer:
         return SceneObservation()
 
 
+class RecordingRuntimeLog:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+        self.frames: list[dict[str, object]] = []
+        self.closed = False
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append({"event": name, **fields})
+
+    def record_frame(self, frame, **fields: object) -> int:
+        self.frames.append({"frame": frame, **fields})
+        return len(self.frames)
+
+    def raise_if_failed(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FailingRuntimeLog(RecordingRuntimeLog):
+    def __init__(self, detail: str) -> None:
+        super().__init__()
+        self.detail = detail
+        self._failed = False
+
+    def record_frame(self, frame, **fields: object) -> int:
+        result = super().record_frame(frame, **fields)
+        self._failed = True
+        return result
+
+    def raise_if_failed(self) -> None:
+        if self._failed:
+            raise RuntimeLogError(self.detail)
+
+
 class OrderedResumeRecognizer(ScriptedRecognizer):
     def __init__(self, events: list[str]) -> None:
         super().__init__()
@@ -565,6 +602,7 @@ def make_engine(
     recognizer: ScriptedRecognizer | None = None,
     window_service: RecordingWindowService | None = None,
     input_service: RecordingInput | None = None,
+    runtime_log: RecordingRuntimeLog | None = None,
 ) -> tuple[
     AutomationEngine,
     AutomationCore,
@@ -589,9 +627,45 @@ def make_engine(
         frame_source=frame_source,
         scene_recognizer=recognizer,
         diagnostics=DiagnosticsStore(tmp_path / "diagnostics"),
+        runtime_log=runtime_log,
     )
     engine.bind(BOUND)
     return engine, core, input_service, window_service, frame_source
+
+
+def test_engine_records_observation_and_state_for_each_processed_frame(tmp_path):
+    runtime_log = RecordingRuntimeLog()
+    source = BlockingSecondLatestFailure()
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path, frame_source=source, runtime_log=runtime_log
+    )
+
+    try:
+        engine.start(1)
+        wait_until(lambda: len(runtime_log.frames) == 1)
+        assert runtime_log.frames[0]["state_before"] is FishingState.READY
+        assert runtime_log.frames[0]["snapshot"].state is FishingState.WAIT_BITE
+    finally:
+        source.allow_second_latest.set()
+        engine.shutdown()
+
+
+def test_engine_pauses_with_e_logging_and_releases_inputs_when_runtime_log_fails(
+    tmp_path,
+):
+    runtime_log = FailingRuntimeLog("日志队列已满")
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path, runtime_log=runtime_log
+    )
+
+    try:
+        engine.start(1)
+        wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+        assert core.pause_code == "E_LOGGING"
+        assert "日志队列已满" in core.snapshot.error
+        assert input_service.events[-1] == "release"
+    finally:
+        engine.shutdown()
 
 
 def test_core_drives_single_round_and_counts_only_after_ready() -> None:

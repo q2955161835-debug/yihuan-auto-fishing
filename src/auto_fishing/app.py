@@ -437,6 +437,7 @@ class ApplicationServices:
     engine: Any
     diagnostics: Any
     settings: Any
+    runtime_log: Any | None = None
 
 
 class Application:
@@ -465,10 +466,21 @@ class Application:
 
         root: Any | None = None
         run_error: BaseException | None = None
+        runtime_log_error: BaseException | None = None
+        runtime_log_started = False
         try:
             services.window_service.enable_dpi_awareness()
             root = self._root_factory()
             services.diagnostics.cleanup()
+            if services.runtime_log is not None:
+                try:
+                    services.runtime_log.start()
+                    services.runtime_log.event(
+                        "application.started", pid=os.getpid()
+                    )
+                    runtime_log_started = True
+                except BaseException as error:
+                    runtime_log_error = error
             control_hwnd = services.window_service.resolve_top_level(
                 root.winfo_id()
             )
@@ -483,14 +495,32 @@ class Application:
                 controller,
                 services.settings,
             )
+            if runtime_log_error is not None:
+                main_window.block_start(
+                    f"运行日志初始化失败：{runtime_log_error}"
+                )
             root.update_idletasks()
-            if not services.window_service.exclude_from_capture(control_hwnd):
+            capture_excluded = services.window_service.exclude_from_capture(
+                control_hwnd
+            )
+            if runtime_log_started:
+                services.runtime_log.event(
+                    "capture.exclusion",
+                    hwnd=control_hwnd,
+                    success=capture_excluded,
+                )
+            if not capture_excluded:
                 main_window.show_warning(
                     "控制窗口无法从截图中排除，请勿遮挡游戏识别区域"
                 )
-            if not services.hotkey.start(
+            hotkey_registered = services.hotkey.start(
                 lambda: controller.pause("F8 紧急暂停")
-            ):
+            )
+            if runtime_log_started:
+                services.runtime_log.event(
+                    "hotkey.registration", success=hotkey_registered
+                )
+            if not hotkey_registered:
                 main_window.block_start("F8 注册失败，请关闭占用 F8 的程序")
             root.mainloop()
         except BaseException as error:
@@ -516,12 +546,17 @@ class Application:
         from auto_fishing.platform.input import SafeInput, Win32InputBackend
         from auto_fishing.platform.windowing import WindowService
         from auto_fishing.storage.diagnostics import DiagnosticsStore
+        from auto_fishing.storage.runtime_logging import RuntimeLogStore
         from auto_fishing.storage.settings import SettingsStore
         from auto_fishing.vision.progress import ProgressController
         from auto_fishing.vision.scenes import SceneRecognizer
 
         window_service = WindowService()
-        safe_input = SafeInput(Win32InputBackend())
+        runtime_log = RuntimeLogStore(data_dir / "runs")
+        safe_input = SafeInput(
+            Win32InputBackend(recorder=runtime_log),
+            recorder=runtime_log,
+        )
         scene_recognizer = SceneRecognizer()
         core = AutomationCore(
             state_machine=FishingStateMachine(),
@@ -536,6 +571,7 @@ class Application:
             frame_source=DxcamFrameSource(),
             scene_recognizer=scene_recognizer,
             diagnostics=diagnostics,
+            runtime_log=runtime_log,
         )
         return ApplicationServices(
             window_service=window_service,
@@ -544,6 +580,7 @@ class Application:
             engine=engine,
             diagnostics=diagnostics,
             settings=SettingsStore(data_dir / "config.json"),
+            runtime_log=runtime_log,
         )
 
     @staticmethod
@@ -556,6 +593,12 @@ class Application:
             ("停止 F8 热键", services.hotkey.stop),
             ("关闭自动化引擎", services.engine.shutdown),
             ("释放输入", services.safe_input.release_all),
+            (
+                "关闭运行日志",
+                (lambda: None)
+                if services.runtime_log is None
+                else services.runtime_log.close,
+            ),
         ):
             try:
                 action()

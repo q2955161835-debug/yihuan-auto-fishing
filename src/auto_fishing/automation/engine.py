@@ -20,6 +20,7 @@ from auto_fishing.model import (
     RuntimeSnapshot,
     SceneObservation,
 )
+from auto_fishing.storage.runtime_logging import RuntimeLogError
 
 
 class InputActionError(RuntimeError):
@@ -302,6 +303,7 @@ class AutomationEngine:
         frame_source: Any,
         scene_recognizer: Any,
         diagnostics: Any,
+        runtime_log: Any | None = None,
         clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -310,6 +312,7 @@ class AutomationEngine:
         self.frame_source = frame_source
         self.scene_recognizer = scene_recognizer
         self.diagnostics = diagnostics
+        self.runtime_log = runtime_log
         self.clock = clock
         self.logger = logger or logging.getLogger(__name__)
         self._bound: Any | None = None
@@ -341,6 +344,7 @@ class AutomationEngine:
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
         self._last_refresh = float("-inf")
+        self._last_logged_status: tuple[str, int, int, str] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -355,6 +359,12 @@ class AutomationEngine:
             if self.is_running or self._starting or self._cancelling:
                 raise RuntimeError("自动化运行中不能更换绑定窗口")
             self._bound = bound
+        self._runtime_event(
+            "automation.bound",
+            title=getattr(bound, "title", ""),
+            device_index=getattr(bound, "device_index", None),
+            output_index=getattr(bound, "output_index", None),
+        )
 
     def start(self, target: int) -> None:
         with self._lifecycle_lock:
@@ -372,6 +382,7 @@ class AutomationEngine:
             raise RuntimeError(f"无法确认游戏窗口前台状态: {error}") from error
         if not foreground:
             raise RuntimeError("请在倒计时结束前切回已绑定的游戏窗口")
+        self._runtime_event("automation.start_requested", target=target)
 
         with self._lifecycle_lock:
             if self._bound is not bound:
@@ -402,6 +413,7 @@ class AutomationEngine:
             self._diagnostic_recorded = False
             self._last_frame = None
             self._last_refresh = float("-inf")
+            self._last_logged_status = None
 
         publish_done = threading.Event()
         core_started = False
@@ -606,6 +618,7 @@ class AutomationEngine:
                 and snapshot.state is FishingState.PAUSED
             ):
                 self._resume_request = requested_epoch
+        self._runtime_event("automation.resume_requested")
 
     def cancel_current(self) -> None:
         deadline = time.monotonic() + 2.0
@@ -699,6 +712,16 @@ class AutomationEngine:
                 ) = self._read_pause_gate()
                 if paused_without_request:
                     self._shutdown_event.wait(0.005)
+                    continue
+                try:
+                    self._raise_if_runtime_log_failed()
+                except RuntimeLogError as error:
+                    self._pause(
+                        "E_LOGGING",
+                        str(error),
+                        self._last_frame,
+                        expected_epoch=operation_epoch,
+                    )
                     continue
                 try:
                     packet = self.frame_source.latest()
@@ -818,6 +841,8 @@ class AutomationEngine:
                             now,
                             code="E_USER_PAUSE",
                         )
+                    if resumed:
+                        self._runtime_event("automation.resumed")
                     self._publish()
                     self._shutdown_event.wait(0.001)
                     continue
@@ -827,6 +852,7 @@ class AutomationEngine:
                     timestamp=packet.timestamp,
                     fps=packet.fps,
                 )
+                state_before = self.core.snapshot.state
                 try:
                     snapshot = self.core.process(
                         observation,
@@ -834,6 +860,23 @@ class AutomationEngine:
                         now,
                         bound.client_rect,
                     )
+                    self._record_runtime_frame(
+                        client_frame,
+                        observation=observation,
+                        state_before=state_before,
+                        snapshot=snapshot,
+                        frame_timestamp=packet.timestamp,
+                        now_monotonic=now,
+                    )
+                    self._raise_if_runtime_log_failed()
+                except RuntimeLogError as error:
+                    self._pause(
+                        "E_LOGGING",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    continue
                 except InputActionError as error:
                     self._pause(
                         "E_INPUT",
@@ -930,6 +973,11 @@ class AutomationEngine:
         )
         actual_code = self.core.pause_code
         actual_detail = self.core.snapshot.error
+        self._runtime_event(
+            "automation.paused",
+            code=actual_code,
+            detail=actual_detail,
+        )
 
         save_diagnostic_now = False
         with self._pause_lock:
@@ -992,6 +1040,7 @@ class AutomationEngine:
         try:
             with self._capture_lock:
                 self.frame_source.stop()
+            self._runtime_event("capture.stopped")
         except Exception as error:
             self.logger.warning("停止截屏失败: %s", error)
 
@@ -1000,6 +1049,11 @@ class AutomationEngine:
             if self._stop_requested():
                 return False
             self.frame_source.start(device_index, output_index)
+            self._runtime_event(
+                "capture.started",
+                device_index=device_index,
+                output_index=output_index,
+            )
             return True
 
     def _stop_requested(self) -> bool:
@@ -1017,11 +1071,60 @@ class AutomationEngine:
 
     def _publish(self) -> None:
         snapshot = self.core.snapshot
+        status = (
+            snapshot.state.value,
+            snapshot.completed,
+            snapshot.target,
+            snapshot.error,
+        )
+        if status != self._last_logged_status:
+            self._last_logged_status = status
+            self._runtime_event(
+                "automation.status",
+                state=snapshot.state.value,
+                completed=snapshot.completed,
+                target=snapshot.target,
+                fps=snapshot.fps,
+                error=snapshot.error,
+                pause_code=self.core.pause_code,
+            )
         for callback in tuple(self._callbacks):
             try:
                 callback(snapshot)
             except Exception as error:
                 self.logger.warning("状态回调失败: %s", error)
+
+    def _record_runtime_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        observation: SceneObservation,
+        state_before: FishingState,
+        snapshot: RuntimeSnapshot,
+        frame_timestamp: float,
+        now_monotonic: float,
+    ) -> None:
+        if self.runtime_log is not None:
+            self.runtime_log.record_frame(
+                frame,
+                observation=observation,
+                state_before=state_before,
+                snapshot=snapshot,
+                frame_timestamp=frame_timestamp,
+                now_monotonic=now_monotonic,
+            )
+
+    def _raise_if_runtime_log_failed(self) -> None:
+        if self.runtime_log is not None:
+            self.runtime_log.raise_if_failed()
+
+    def _runtime_event(self, name: str, **fields: Any) -> None:
+        if self.runtime_log is None:
+            return
+        try:
+            self.runtime_log.event(name, **fields)
+        except Exception as error:
+            self.logger.warning("保存运行日志事件失败: %s", error)
 
     def _require_bound(self) -> Any:
         bound = self._bound
