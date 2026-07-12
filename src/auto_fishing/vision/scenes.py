@@ -87,7 +87,8 @@ class SceneRecognizer:
             occlusion,
         )
 
-        progress = self.progress_recognizer.detect(top, timestamp)
+        progress_result = self.progress_recognizer.analyze(top, timestamp)
+        progress = progress_result.observation
         bite = self.bite_detector.detect(bite_roi)
         result_candidate = (
             progress is None
@@ -127,6 +128,9 @@ class SceneRecognizer:
             result_candidate=result_candidate,
             ready=ready,
             progress=progress,
+            progress_scanlines=progress_result.valid_scanlines,
+            progress_candidates=progress_result.candidate_count,
+            progress_rejection=progress_result.rejection_reason,
         )
 
 

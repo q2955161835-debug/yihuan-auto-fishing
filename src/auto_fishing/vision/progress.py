@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import cv2
@@ -19,8 +20,60 @@ class _LineCandidate:
     yellow_center: float
 
 
+@dataclass(frozen=True)
+class ProgressScanResult:
+    observation: ProgressObservation | None
+    valid_scanlines: int = 0
+    candidate_count: int = 0
+    rejection_reason: str = ""
+
+
 class ProgressRecognizer:
-    def detect(self, image: np.ndarray, timestamp: float) -> ProgressObservation | None:
+    def __init__(self) -> None:
+        self._history: deque[ProgressObservation] = deque(maxlen=5)
+        self._pending_jump: ProgressObservation | None = None
+
+    def detect(
+        self,
+        image: np.ndarray,
+        timestamp: float,
+    ) -> ProgressObservation | None:
+        return self.analyze(image, timestamp).observation
+
+    def analyze(
+        self,
+        image: np.ndarray,
+        timestamp: float,
+    ) -> ProgressScanResult:
+        result = self._scan_current(image, timestamp)
+        observation = result.observation
+        if observation is None:
+            self._pending_jump = None
+            return result
+
+        if self._history and _center_jump(
+            self._history[-1],
+            observation,
+        ) > 0.20:
+            pending = self._pending_jump
+            if pending is None or not _same_location(pending, observation):
+                self._pending_jump = observation
+                return ProgressScanResult(
+                    observation=None,
+                    valid_scanlines=result.valid_scanlines,
+                    candidate_count=result.candidate_count,
+                    rejection_reason="jump_pending",
+                )
+
+        self._pending_jump = None
+        self._history.append(observation)
+        return result
+
+    def _scan_current(
+        self,
+        image: np.ndarray,
+        timestamp: float,
+    ) -> ProgressScanResult:
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         green_mask = cv2.inRange(
             hsv,
@@ -55,7 +108,10 @@ class ProgressRecognizer:
             if run[1] - run[0] <= max(16, image_width * 0.04)
         ]
         if not yellow_runs:
-            return None
+            return ProgressScanResult(
+                observation=None,
+                rejection_reason="yellow_missing",
+            )
 
         candidates_by_line = [
             _line_candidates(
@@ -65,13 +121,25 @@ class ProgressRecognizer:
             )
             for row in rows
         ]
+        valid_scanlines = sum(bool(candidates) for candidates in candidates_by_line)
+        candidate_count = sum(len(candidates) for candidates in candidates_by_line)
         consensus = _consensus(candidates_by_line, image_width)
         if consensus is None:
-            return None
+            return ProgressScanResult(
+                observation=None,
+                valid_scanlines=valid_scanlines,
+                candidate_count=candidate_count,
+                rejection_reason="no_consensus",
+            )
         candidate, agreeing_scanlines = consensus
         green_width = candidate.green_right - candidate.green_left
         if green_width < image_width * 0.12:
-            return None
+            return ProgressScanResult(
+                observation=None,
+                valid_scanlines=valid_scanlines,
+                candidate_count=candidate_count,
+                rejection_reason="bar_too_narrow",
+            )
 
         agreement = agreeing_scanlines / len(_SCAN_FRACTIONS)
         width_score = min(
@@ -79,12 +147,16 @@ class ProgressRecognizer:
             green_width / (image_width * 0.12),
         )
         width = float(image_width)
-        return ProgressObservation(
-            green_left=candidate.green_left / width,
-            green_right=candidate.green_right / width,
-            yellow_x=candidate.yellow_center / width,
-            confidence=(agreement + width_score) / 2,
-            timestamp=timestamp,
+        return ProgressScanResult(
+            observation=ProgressObservation(
+                green_left=candidate.green_left / width,
+                green_right=candidate.green_right / width,
+                yellow_x=candidate.yellow_center / width,
+                confidence=(agreement + width_score) / 2,
+                timestamp=timestamp,
+            ),
+            valid_scanlines=agreeing_scanlines,
+            candidate_count=candidate_count,
         )
 
 
@@ -219,4 +291,28 @@ def _consensus(
             ),
         ),
         len(selected),
+    )
+
+
+def _center_jump(
+    first: ProgressObservation,
+    second: ProgressObservation,
+) -> float:
+    first_center = (first.green_left + first.green_right) / 2
+    second_center = (second.green_left + second.green_right) / 2
+    return abs(first_center - second_center)
+
+
+def _same_location(
+    first: ProgressObservation,
+    second: ProgressObservation,
+) -> bool:
+    return (
+        _center_jump(first, second) <= 0.02
+        and abs(
+            (first.green_right - first.green_left)
+            - (second.green_right - second.green_left)
+        )
+        <= 0.02
+        and abs(first.yellow_x - second.yellow_x) <= 0.02
     )

@@ -78,6 +78,9 @@ class SceneObservation:
     result_candidate: bool = False
     ready: bool = False
     progress: ProgressObservation | None = None
+    progress_scanlines: int = 0
+    progress_candidates: int = 0
+    progress_rejection: str = ""
 
 
 @dataclass(frozen=True)

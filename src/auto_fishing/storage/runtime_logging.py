@@ -111,6 +111,9 @@ class RuntimeLogStore:
             "ready": observation.ready,
             "result": observation.result,
             "result_candidate": observation.result_candidate,
+            "progress_scanlines": observation.progress_scanlines,
+            "progress_candidates": observation.progress_candidates,
+            "progress_rejection": observation.progress_rejection,
         }
         if observation.progress is not None:
             fields.update(

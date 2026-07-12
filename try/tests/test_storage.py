@@ -110,7 +110,12 @@ def test_runtime_log_writes_jsonl_and_480px_jpeg(tmp_path):
     store.event("application.started", pid=123)
     store.record_frame(
         np.zeros((1080, 1920, 3), dtype=np.uint8),
-        observation=SceneObservation(ready=True),
+        observation=SceneObservation(
+            ready=True,
+            progress_scanlines=2,
+            progress_candidates=1,
+            progress_rejection="jump_pending",
+        ),
         state_before=FishingState.READY,
         snapshot=RuntimeSnapshot(FishingState.WAIT_BITE, 0, 1, 30.0),
         frame_timestamp=10.0,
@@ -125,6 +130,9 @@ def test_runtime_log_writes_jsonl_and_480px_jpeg(tmp_path):
     image = cv2.imread(str(run_dir / "frames" / "00000001.jpg"))
     assert entries[0]["event"] == "application.started"
     assert entries[-1]["event"] == "frame.processed"
+    assert entries[-1]["progress_scanlines"] == 2
+    assert entries[-1]["progress_candidates"] == 1
+    assert entries[-1]["progress_rejection"] == "jump_pending"
     assert max(image.shape[:2]) == 480
 
 

@@ -301,6 +301,19 @@ def test_progress_suppresses_result_confirmation() -> None:
     assert observation.result is False
 
 
+def test_scene_observation_copies_progress_scan_diagnostics() -> None:
+    recognizer = SceneRecognizer()
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    add_progress(frame)
+
+    observation = recognizer.observe(frame, 1.0)
+
+    assert observation.progress is not None
+    assert observation.progress_scanlines >= 3
+    assert observation.progress_candidates >= 1
+    assert observation.progress_rejection == ""
+
+
 def test_progress_suppresses_ready_confirmation() -> None:
     recognizer = SceneRecognizer()
     frame = ready_frame()

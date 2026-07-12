@@ -160,7 +160,7 @@ def test_thirty_fast_frames_are_located_independently() -> None:
     controller = ProgressController()
 
     for index in range(30):
-        left = (index * 37) % 170
+        left = 20 + index * 4
         right = left + 100
         yellow = left + 50
         obs = recognizer.detect(frame((left, right), yellow), index / 30)
@@ -172,12 +172,34 @@ def test_thirty_fast_frames_are_located_independently() -> None:
         assert controller.decide(obs) == Direction.RELEASE
 
 
-def test_missing_frame_between_fast_frames_does_not_reuse_last_observation() -> None:
+def test_analyze_reports_scanline_consensus() -> None:
+    result = ProgressRecognizer().analyze(frame(), 1.0)
+
+    assert result.observation is not None
+    assert result.valid_scanlines >= 3
+    assert result.candidate_count >= 1
+    assert result.rejection_reason == ""
+
+
+def test_large_single_frame_jump_is_released_until_confirmed() -> None:
     recognizer = ProgressRecognizer()
 
     assert recognizer.detect(frame((20, 120), 70), 0.0) is not None
-    assert recognizer.detect(np.zeros((120, 300, 3), dtype=np.uint8), 1 / 30) is None
-    obs = recognizer.detect(frame((170, 270), 220), 2 / 30)
+    assert recognizer.detect(frame((170, 270), 220), 1 / 30) is None
+    observation = recognizer.detect(frame((170, 270), 220), 2 / 30)
 
-    assert obs is not None
-    assert obs.green_left > 0.55
+    assert observation is not None
+    assert observation.green_left > 0.55
+
+
+def test_missing_frame_does_not_reuse_last_observation() -> None:
+    recognizer = ProgressRecognizer()
+
+    assert recognizer.detect(frame((20, 120), 70), 0.0) is not None
+    assert (
+        recognizer.detect(
+            np.zeros((120, 300, 3), dtype=np.uint8),
+            1 / 30,
+        )
+        is None
+    )
