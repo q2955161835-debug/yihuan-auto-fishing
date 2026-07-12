@@ -18,29 +18,42 @@ from auto_fishing.vision.regions import (
 
 class BiteDetector:
     def __init__(self) -> None:
+        self.baseline: tuple[float, float, float] | None = None
         self.consecutive = 0
+        self.frames_since_baseline = 0
 
     def set_baseline(self, roi: np.ndarray) -> None:
+        self.baseline = self._signature(roi)
         self.consecutive = 0
+        self.frames_since_baseline = 0
 
     def detect(self, roi: np.ndarray) -> bool:
-        white, edges, dark = self._signature(roi)
-        prompt_visible = (
-            0.02 < white < 0.20
-            and edges > 0.02
-            and 0.05 <= dark <= 0.80
+        if self.baseline is None:
+            return False
+
+        self.frames_since_baseline += 1
+        if self.frames_since_baseline <= 45:
+            self.consecutive = 0
+            return False
+
+        blue, white, edges = self._signature(roi)
+        blue_changed = blue - self.baseline[0] > 0.03
+        shape_changed = (
+            white - self.baseline[1] > 0.03
+            or edges - self.baseline[2] > 0.02
         )
-        self.consecutive = self.consecutive + 1 if prompt_visible else 0
+        changed = blue_changed and shape_changed
+        self.consecutive = self.consecutive + 1 if changed else 0
         return self.consecutive >= 2
 
     @staticmethod
     def _signature(roi: np.ndarray) -> tuple[float, float, float]:
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        blue = cv2.inRange(hsv, (90, 100, 80), (135, 255, 255)).mean() / 255
         white = cv2.inRange(hsv, (0, 0, 190), (179, 80, 255)).mean() / 255
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 80, 160).mean() / 255
-        dark = (gray < 60).mean()
-        return float(white), float(edges), float(dark)
+        return float(blue), float(white), float(edges)
 
 
 class SceneRecognizer:

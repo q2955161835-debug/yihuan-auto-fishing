@@ -1054,6 +1054,12 @@ class AppSafeInput:
         self.events.append("input.close")
 
 
+class FailingCloseAppSafeInput(AppSafeInput):
+    def close(self) -> None:
+        self.events.append("input.close")
+        raise OSError("关闭屏幕键盘失败")
+
+
 class AppDiagnostics:
     def __init__(self, events: list[object]) -> None:
         self.events = events
@@ -1170,6 +1176,42 @@ def test_application_starts_and_closes_runtime_log() -> None:
     assert events.index("runtime_log.close") > events.index("input.release_all")
     assert events.index("input.release_all") < events.index("input.close")
     assert events.index("input.close") < events.index("runtime_log.close")
+
+
+def test_application_records_cleanup_failure_before_closing_runtime_log() -> None:
+    events: list[object] = []
+    root = AppRoot(events)
+    runtime_log = AppRuntimeLog(events)
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=FailingCloseAppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=runtime_log,
+    )
+
+    with pytest.raises(BaseExceptionGroup, match="程序关闭清理失败"):
+        Application(
+            services=services,
+            root_factory=lambda: root,
+            main_window_factory=lambda root, controller, settings: AppMainWindow(
+                root, controller, settings, events
+            ),
+        ).run()
+
+    failure = (
+        "runtime_log.event",
+        "application.cleanup_failed",
+        {
+            "step": "关闭屏幕键盘输入",
+            "error_type": "OSError",
+            "detail": "关闭屏幕键盘失败",
+        },
+    )
+    assert failure in events
+    assert events.index(failure) < events.index("runtime_log.close")
 
 
 def test_application_blocks_start_when_runtime_log_initialization_fails() -> None:

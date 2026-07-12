@@ -603,18 +603,13 @@ class Application:
             ("关闭自动化引擎", services.engine.shutdown),
             ("释放输入", services.safe_input.release_all),
             ("关闭屏幕键盘输入", services.safe_input.close),
-            (
-                "关闭运行日志",
-                (lambda: None)
-                if services.runtime_log is None
-                else services.runtime_log.close,
-            ),
         ):
             try:
                 action()
             except BaseException as error:
                 error.add_note(label)
                 errors.append(error)
+                Application._record_cleanup_failure(services, label, error)
 
         if root is not None:
             try:
@@ -625,4 +620,38 @@ class Application:
             except BaseException as error:
                 error.add_note("销毁 Tk 主窗口")
                 errors.append(error)
+                Application._record_cleanup_failure(services, "销毁 Tk 主窗口", error)
+
+        if services.runtime_log is not None:
+            try:
+                services.runtime_log.event(
+                    "application.cleanup_finished",
+                    error_count=len(errors),
+                )
+            except BaseException as error:
+                error.add_note("记录关闭诊断")
+                errors.append(error)
+            try:
+                services.runtime_log.close()
+            except BaseException as error:
+                error.add_note("关闭运行日志")
+                errors.append(error)
         return errors
+
+    @staticmethod
+    def _record_cleanup_failure(
+        services: ApplicationServices,
+        label: str,
+        error: BaseException,
+    ) -> None:
+        if services.runtime_log is None:
+            return
+        try:
+            services.runtime_log.event(
+                "application.cleanup_failed",
+                step=label,
+                error_type=type(error).__name__,
+                detail=str(error),
+            )
+        except BaseException:
+            pass
