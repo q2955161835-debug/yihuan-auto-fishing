@@ -144,7 +144,7 @@ def test_release_all_cancels_f_before_its_delayed_press() -> None:
     assert backend.events == []
 
 
-def test_tap_f_releases_key_when_sleep_fails() -> None:
+def test_tap_f_does_not_press_when_pre_delay_sleep_fails() -> None:
     backend = FakeBackend()
 
     def fail_sleep(_: float) -> None:
@@ -155,7 +155,7 @@ def test_tap_f_releases_key_when_sleep_fails() -> None:
     with pytest.raises(RuntimeError, match="sleep interrupted"):
         safe.tap_f()
 
-    assert backend.events == [("down", "F"), ("up", "F")]
+    assert backend.events == []
 
 
 class FakeUser32:
@@ -357,7 +357,12 @@ def test_win32_records_cursor_result_for_click() -> None:
 
 def test_safe_input_records_tap_and_direction_requests() -> None:
     recorder = RecordingLog()
-    safe = SafeInput(FakeBackend(), sleep=lambda _: None, recorder=recorder)
+    safe = SafeInput(
+        FakeBackend(),
+        sleep=lambda _: None,
+        recorder=recorder,
+        random_uniform=lambda _lower, _upper: 0.10,
+    )
 
     safe.tap_f()
     safe.set_direction(Direction.RIGHT)
@@ -365,6 +370,7 @@ def test_safe_input_records_tap_and_direction_requests() -> None:
 
     assert recorder.events == [
         {"event": "input.request", "action": "tap", "key": "F"},
+        {"event": "input.delay", "key": "F", "seconds": 0.10},
         {"event": "input.request", "action": "key_down", "key": "F"},
         {"event": "input.request", "action": "key_up", "key": "F"},
         {"event": "input.request", "action": "key_down", "key": "D"},
