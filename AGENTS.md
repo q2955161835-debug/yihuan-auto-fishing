@@ -63,6 +63,7 @@ Tk 控制窗口的内部句柄必须先通过 `GetAncestor(..., GA_ROOT)` 解析
 ## 本地数据与环境变量
 
 - 配置、诊断和运行记录目录使用 `%LOCALAPPDATA%\异环自动钓鱼\`，不得写入敏感信息；诊断清理只允许作用于其 `diagnostics` 子目录。
+- 诊断截图目录含中文路径，`DiagnosticsStore`（诊断存储）写 PNG 必须使用 `cv2.imencode(...).tofile(...)`，不得使用不支持 Unicode 路径的 `cv2.imwrite`；异常暂停时原始帧诊断可用于校准，正常运行帧仍按 480 像素 JPEG 保存。
 - 完整运行记录固定写入其 `runs` 子目录：每次启动一个独立目录，含 `events.jsonl` 和 `frames/`；帧截图最长边 480 像素、JPEG 质量 50，仅保留最近 30 个运行目录。异步写入队列上限为 300 项；队列满或写入失败必须以 `PAUSED/E_LOGGING` 暂停并释放输入，不能丢帧后继续自动化。
 - 设置文件固定为 `%LOCALAPPDATA%\异环自动钓鱼\config.json`；读取设置时拒绝溢出及 `NaN`、`Infinity` 等非有限数字。
 - `.env` 是真实环境变量账本，已被 Git 忽略；当前项目不需要环境变量。

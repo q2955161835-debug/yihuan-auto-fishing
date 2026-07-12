@@ -80,6 +80,17 @@ def test_diagnostic_metadata_contains_no_frame_bytes(tmp_path):
     assert set(data) == {"code", "detail", "created_at"}
 
 
+def test_diagnostics_save_screenshot_under_unicode_directory(tmp_path):
+    store = DiagnosticsStore(tmp_path / "异环自动钓鱼" / "diagnostics")
+
+    store.save(np.full((4, 4, 3), 127, dtype=np.uint8), "E_VISION", "测试")
+
+    image_path = next(store.root.glob("*.png"))
+    image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert image is not None
+    assert image.shape == (4, 4, 3)
+
+
 def test_diagnostics_same_timestamp_and_code_create_distinct_groups(tmp_path):
     store = DiagnosticsStore(tmp_path / "diagnostics")
     now = datetime(2026, 7, 10, tzinfo=timezone.utc)

@@ -31,8 +31,10 @@ class DiagnosticsStore:
             sequence += 1
         image_path = self.root / f"{stem}.png"
         meta_path = self.root / f"{stem}.json"
-        if not cv2.imwrite(str(image_path), frame):
+        encoded, payload = cv2.imencode(".png", frame)
+        if not encoded:
             raise OSError("诊断截图写入失败")
+        payload.tofile(image_path)
         meta_path.write_text(
             json.dumps(
                 {"code": code, "detail": detail, "created_at": now.isoformat()},
