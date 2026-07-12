@@ -86,6 +86,21 @@ def add_bite_prompt(image: np.ndarray) -> None:
     )
 
 
+def reel_prompt_frame(width: int = 1280, height: int = 720) -> np.ndarray:
+    image = np.full((height, width, 3), 80, dtype=np.uint8)
+    x1, x2 = round(width * 0.22), round(width * 0.60)
+    y1, y2 = round(height * 0.16), round(height * 0.24)
+    cv2.rectangle(image, (x1, y1), (x2, y2), (20, 20, 20), -1)
+    cv2.rectangle(
+        image,
+        (round(width * 0.31), round(height * 0.185)),
+        (round(width * 0.51), round(height * 0.215)),
+        (255, 255, 255),
+        -1,
+    )
+    return image
+
+
 def screen_keyboard_patch_frame() -> tuple[np.ndarray, Rect]:
     image = np.full((720, 1280, 3), 180, dtype=np.uint8)
     occlusion = Rect(0, 330, 920, 720)
@@ -185,6 +200,17 @@ def test_result_requires_three_consecutive_frames() -> None:
     assert observation.result_candidate is True
     assert observation.result is True
     assert observation.progress is None
+
+
+def test_reel_prompt_requires_two_consecutive_frames() -> None:
+    recognizer = SceneRecognizer()
+    prompt = reel_prompt_frame()
+    neutral = np.full_like(prompt, 80)
+
+    assert recognizer.observe(prompt, 1.0).reel_prompt is False
+    assert recognizer.observe(neutral, 1.1).reel_prompt is False
+    assert recognizer.observe(prompt, 1.2).reel_prompt is False
+    assert recognizer.observe(prompt, 1.3).reel_prompt is True
 
 
 def test_dark_blue_night_scene_is_not_result_candidate() -> None:

@@ -253,6 +253,12 @@ class AutomationCore:
                 raise InputActionError(str(error)) from error
 
     def _control(self, observation: SceneObservation, now: float) -> None:
+        if observation.reel_prompt:
+            self._input(self.input_service.release_all)
+            self._input(self.input_service.tap_f)
+            self.state_machine.handle(Event.BAR_GONE, now)
+            return
+
         if observation.progress is not None:
             self.bar_missing_frames = 0
             self.result_candidate_frames = 0

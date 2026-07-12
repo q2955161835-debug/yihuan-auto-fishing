@@ -9,6 +9,7 @@ from auto_fishing.vision.progress import ProgressRecognizer
 from auto_fishing.vision.regions import (
     BITE_ROI,
     READY_ROI,
+    REEL_PROMPT_ROI,
     RESULT_CENTER_ROI,
     RESULT_ROI,
     TOP_ROI,
@@ -61,6 +62,7 @@ class SceneRecognizer:
         self.bite_detector = BiteDetector()
         self.progress_recognizer = ProgressRecognizer()
         self.result_consecutive = 0
+        self.reel_prompt_consecutive = 0
         self.ready_consecutive = 0
 
     def set_bite_baseline(self, client_frame: np.ndarray) -> None:
@@ -75,6 +77,7 @@ class SceneRecognizer:
     ) -> SceneObservation:
         top = crop_normalized(client_frame, TOP_ROI)
         bite_roi = crop_normalized(client_frame, BITE_ROI)
+        reel_prompt_roi = crop_normalized(client_frame, REEL_PROMPT_ROI)
         ready_roi = crop_normalized(client_frame, READY_ROI)
         result_center = crop_normalized(client_frame, RESULT_CENTER_ROI)
         result_valid = _valid_mask(
@@ -92,6 +95,11 @@ class SceneRecognizer:
             and _white_ratio(result_center, result_valid) > 0.05
             and _dark_ratio(result_center, result_valid) < 0.60
         )
+        reel_prompt_candidate = (
+            _white_ratio(reel_prompt_roi) > 0.02
+            and _dark_ratio(reel_prompt_roi) > 0.60
+            and _blue_ratio(reel_prompt_roi) < 0.01
+        )
         ready_candidate = (
             progress is None
             and _white_ratio(ready_roi) > 0.01
@@ -105,11 +113,16 @@ class SceneRecognizer:
         self.ready_consecutive = (
             self.ready_consecutive + 1 if ready_candidate else 0
         )
+        self.reel_prompt_consecutive = (
+            self.reel_prompt_consecutive + 1 if reel_prompt_candidate else 0
+        )
         result = self.result_consecutive >= 3
+        reel_prompt = self.reel_prompt_consecutive >= 2
         ready = self.ready_consecutive >= 3 and not result
 
         return SceneObservation(
             bite=bite,
+            reel_prompt=reel_prompt,
             result=result,
             result_candidate=result_candidate,
             ready=ready,

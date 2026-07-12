@@ -73,6 +73,7 @@ class ProgressObservation:
 @dataclass(frozen=True)
 class SceneObservation:
     bite: bool = False
+    reel_prompt: bool = False
     result: bool = False
     result_candidate: bool = False
     ready: bool = False

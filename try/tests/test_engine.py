@@ -810,6 +810,15 @@ def test_core_requires_two_result_candidates_before_leaving_control() -> None:
     assert not any(isinstance(event, tuple) for event in input_service.events)
 
 
+def test_control_reel_prompt_releases_direction_taps_f_and_waits_result() -> None:
+    core, input_service, _state_machine = make_core(state=FishingState.CONTROL)
+
+    core.process(SceneObservation(reel_prompt=True), None, 0.1, CLIENT)
+
+    assert core.snapshot.state is FishingState.WAIT_RESULT
+    assert input_service.events == ["release", "F"]
+
+
 def test_result_candidates_on_sixth_and_seventh_missing_frames_win_over_loss() -> None:
     core, _input_service, _state_machine = make_core(
         state=FishingState.CONTROL

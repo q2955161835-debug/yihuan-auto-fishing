@@ -107,6 +107,7 @@ class RuntimeLogStore:
             "target": snapshot.target,
             "error": snapshot.error,
             "bite": observation.bite,
+            "reel_prompt": observation.reel_prompt,
             "ready": observation.ready,
             "result": observation.result,
             "result_candidate": observation.result_candidate,
