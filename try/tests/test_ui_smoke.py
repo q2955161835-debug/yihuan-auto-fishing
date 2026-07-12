@@ -152,7 +152,20 @@ def test_window_geometry_supports_negative_monitor_coordinates(root) -> None:
     finally:
         root.geometry = original_geometry  # type: ignore[method-assign]
 
-    assert requested == ["320x240-1920+20"]
+    assert requested == ["400x240-1920+20"]
+
+
+def test_window_geometry_leaves_room_for_right_side_status(root) -> None:
+    controller = FakeController()
+    requested: list[str] = []
+    original_geometry = root.geometry
+    root.geometry = lambda value: requested.append(value)  # type: ignore[method-assign]
+    try:
+        MainWindow(root, controller, FakeSettings())
+    finally:
+        root.geometry = original_geometry  # type: ignore[method-assign]
+
+    assert requested == ["400x240+20+20"]
 
 
 def test_binding_callbacks_update_visible_status(root) -> None:

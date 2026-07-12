@@ -8,6 +8,10 @@ from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.storage.settings import AppSettings
 
 
+_WINDOW_WIDTH = 400
+_WINDOW_HEIGHT = 240
+
+
 class MainWindow:
     """Always-on-top control window for the fishing automation."""
 
@@ -25,9 +29,10 @@ class MainWindow:
 
         root.title("异环自动钓鱼")
         root.geometry(
-            f"320x240{self.settings.window_x:+d}{self.settings.window_y:+d}"
+            f"{_WINDOW_WIDTH}x{_WINDOW_HEIGHT}"
+            f"{self.settings.window_x:+d}{self.settings.window_y:+d}"
         )
-        root.minsize(320, 240)
+        root.minsize(_WINDOW_WIDTH, _WINDOW_HEIGHT)
         root.attributes("-topmost", True)
 
         self.binding_var = tk.StringVar(master=root, value="未绑定")
@@ -68,7 +73,9 @@ class MainWindow:
             width=7,
         )
         self.count_spinbox.grid(row=1, column=1, sticky="w")
-        ttk.Label(content, text="阶段：").grid(row=1, column=2, sticky="e")
+        ttk.Label(content, text="阶段：").grid(
+            row=1, column=2, padx=(16, 4), sticky="e"
+        )
         ttk.Label(content, textvariable=self.state_var).grid(
             row=1, column=3, sticky="w"
         )
@@ -77,7 +84,9 @@ class MainWindow:
         ttk.Label(content, textvariable=self.progress_var).grid(
             row=2, column=1, sticky="w"
         )
-        ttk.Label(content, text="帧率：").grid(row=2, column=2, sticky="e")
+        ttk.Label(content, text="帧率：").grid(
+            row=2, column=2, padx=(16, 4), sticky="e"
+        )
         ttk.Label(content, textvariable=self.fps_var).grid(
             row=2, column=3, sticky="w"
         )
@@ -86,7 +95,7 @@ class MainWindow:
         ttk.Label(
             content,
             textvariable=self.error_var,
-            wraplength=225,
+            wraplength=305,
         ).grid(row=3, column=1, columnspan=3, sticky="w")
 
         buttons = ttk.Frame(content)
