@@ -231,21 +231,55 @@ def test_win32_api_closes_owned_keyboard_with_wm_close() -> None:
     assert user32.messages == [(55, 0x0010)]
 
 
-def test_osk_launcher_starts_system32_executable_without_shell() -> None:
-    calls: list[tuple[list[str], bool]] = []
+class FakeShell32:
+    def __init__(self, result: int = 33) -> None:
+        self.result = result
+        self.calls: list[tuple[object, ...]] = []
 
-    def popen(command: list[str], *, shell: bool) -> object:
-        calls.append((command, shell))
-        return object()
+    def ShellExecuteW(
+        self,
+        owner: int,
+        operation: str,
+        executable: str,
+        parameters: object,
+        directory: object,
+        show: int,
+    ) -> int:
+        self.calls.append(
+            (owner, operation, executable, parameters, directory, show)
+        )
+        return self.result
 
+
+def test_osk_launcher_uses_windows_shell_for_accessibility_executable() -> None:
+    shell32 = FakeShell32()
     launcher = OskLauncher(
-        popen=popen,
+        shell32=shell32,
         environ={"WINDIR": r"C:\Windows"},
     )
 
     launcher.start()
 
-    assert calls == [([r"C:\Windows\System32\osk.exe"], False)]
+    assert shell32.calls == [
+        (
+            0,
+            "open",
+            r"C:\Windows\System32\osk.exe",
+            None,
+            None,
+            1,
+        )
+    ]
+
+
+def test_osk_launcher_reports_shell_execute_failure_code() -> None:
+    launcher = OskLauncher(
+        shell32=FakeShell32(result=5),
+        environ={"WINDIR": r"C:\Windows"},
+    )
+
+    with pytest.raises(OnScreenKeyboardError, match="ShellExecute 返回 5"):
+        launcher.start()
 
 
 @pytest.mark.parametrize(

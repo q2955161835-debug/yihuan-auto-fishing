@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import subprocess
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,10 +133,21 @@ class OskLauncher:
     def __init__(
         self,
         *,
-        popen: Callable[..., Any] = subprocess.Popen,
+        shell32: Any | None = None,
         environ: dict[str, str] | os._Environ[str] = os.environ,
     ) -> None:
-        self.popen = popen
+        if shell32 is None:
+            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+            shell32.ShellExecuteW.argtypes = (
+                wintypes.HWND,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                ctypes.c_int,
+            )
+            shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+        self.shell32 = shell32
         self.environ = environ
 
     def start(self) -> None:
@@ -145,12 +155,22 @@ class OskLauncher:
         if not windows_dir:
             raise OnScreenKeyboardError("WINDIR 未配置，无法启动屏幕键盘")
         executable = Path(windows_dir) / "System32" / "osk.exe"
-        try:
-            self.popen([str(executable)], shell=False)
-        except OSError as error:
+        result = int(
+            self.shell32.ShellExecuteW(
+                0,
+                "open",
+                str(executable),
+                None,
+                None,
+                1,
+            )
+            or 0
+        )
+        if result <= 32:
             raise OnScreenKeyboardError(
-                f"启动 Windows 屏幕键盘失败: {error}"
-            ) from error
+                "启动 Windows 屏幕键盘失败；"
+                f"ShellExecute 返回 {result}"
+            )
 
 
 class OnScreenKeyboardWindow:
