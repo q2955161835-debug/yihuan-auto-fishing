@@ -75,19 +75,21 @@ class ProgressRecognizer:
 
 
 class ProgressController:
-    def __init__(self, margin_ratio: float = 0.15) -> None:
-        self.margin_ratio = margin_ratio
+    def __init__(self, center_tolerance_ratio: float = 0.10) -> None:
+        if not 0 < center_tolerance_ratio < 0.5:
+            raise ValueError("center_tolerance_ratio 必须在 0 与 0.5 之间")
+        self.center_tolerance_ratio = center_tolerance_ratio
 
     def decide(self, observation: ProgressObservation | None) -> Direction:
         if observation is None:
             return Direction.RELEASE
 
         green_width = observation.green_right - observation.green_left
-        safe_left = observation.green_left + green_width * self.margin_ratio
-        safe_right = observation.green_right - green_width * self.margin_ratio
-        if observation.yellow_x < safe_left:
+        green_center = (observation.green_left + observation.green_right) / 2
+        tolerance = green_width * self.center_tolerance_ratio
+        if observation.yellow_x < green_center - tolerance:
             return Direction.RIGHT
-        if observation.yellow_x > safe_right:
+        if observation.yellow_x > green_center + tolerance:
             return Direction.LEFT
         return Direction.RELEASE
 

@@ -46,11 +46,26 @@ def test_detects_green_interval_and_yellow_marker() -> None:
 
 def test_controller_moves_toward_inner_safe_band() -> None:
     recognizer = ProgressRecognizer()
-    controller = ProgressController(margin_ratio=0.15)
+    controller = ProgressController(center_tolerance_ratio=0.10)
 
     assert controller.decide(recognizer.detect(frame(yellow=75), 1.0)) == Direction.RIGHT
     assert controller.decide(recognizer.detect(frame(yellow=120), 1.1)) == Direction.RELEASE
     assert controller.decide(recognizer.detect(frame(yellow=165), 1.2)) == Direction.LEFT
+
+
+def test_controller_moves_marker_right_when_it_is_left_of_green_center() -> None:
+    observation = ProgressRecognizer().detect(frame(green=(180, 270), yellow=190), 1.0)
+
+    assert ProgressController().decide(observation) == Direction.RIGHT
+
+
+def test_controller_uses_a_narrow_deadband_around_green_center() -> None:
+    recognizer = ProgressRecognizer()
+    controller = ProgressController()
+
+    assert controller.decide(recognizer.detect(frame(yellow=100), 1.0)) == Direction.RIGHT
+    assert controller.decide(recognizer.detect(frame(yellow=120), 1.1)) == Direction.RELEASE
+    assert controller.decide(recognizer.detect(frame(yellow=140), 1.2)) == Direction.LEFT
 
 
 def test_no_color_candidates_returns_none_and_releases() -> None:
