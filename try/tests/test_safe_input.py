@@ -97,6 +97,53 @@ def test_tap_f_and_click_are_balanced() -> None:
     assert backend.events == [("down", "F"), ("up", "F"), ("click", 200, 300)]
 
 
+def test_tap_f_waits_for_bounded_pre_press_delay() -> None:
+    backend = FakeBackend()
+    waits: list[float] = []
+    safe = SafeInput(
+        backend,
+        sleep=waits.append,
+        random_uniform=lambda _lower, upper: upper,
+    )
+
+    safe.tap_f()
+
+    assert waits == [0.18, 0.05]
+    assert backend.events == [("down", "F"), ("up", "F")]
+
+
+def test_direction_changes_do_not_wait_for_f_jitter() -> None:
+    backend = FakeBackend()
+    waits: list[float] = []
+    safe = SafeInput(backend, sleep=waits.append)
+
+    safe.set_direction(Direction.LEFT)
+    safe.set_direction(Direction.RIGHT)
+
+    assert waits == []
+    assert backend.events == [("down", "A"), ("up", "A"), ("down", "D")]
+
+
+def test_release_all_cancels_f_before_its_delayed_press() -> None:
+    backend = FakeBackend()
+    waits: list[float] = []
+    safe: SafeInput
+
+    def interrupting_sleep(seconds: float) -> None:
+        waits.append(seconds)
+        safe.release_all()
+
+    safe = SafeInput(
+        backend,
+        sleep=interrupting_sleep,
+        random_uniform=lambda _lower, _upper: 0.10,
+    )
+    safe.tap_f()
+
+    assert waits == [0.10]
+    assert backend.events == []
+
+
 def test_tap_f_releases_key_when_sleep_fails() -> None:
     backend = FakeBackend()
 

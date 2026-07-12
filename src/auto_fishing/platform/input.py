@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import math
+from random import uniform as real_uniform
 from time import sleep as real_sleep
 from typing import Any, Callable, Protocol
 
@@ -176,12 +178,15 @@ class SafeInput:
         backend: InputBackend,
         sleep: Callable[[float], None] = real_sleep,
         recorder: InputRecorder | None = None,
+        random_uniform: Callable[[float, float], float] = real_uniform,
     ) -> None:
         self.backend = backend
         self.sleep = sleep
         self.recorder = recorder
+        self.random_uniform = random_uniform
         self.held: set[str] = set()
         self.mouse_held = False
+        self._cancel_generation = 0
 
     def _down(self, key: str) -> None:
         if key not in self.held:
@@ -197,6 +202,13 @@ class SafeInput:
 
     def tap_f(self) -> None:
         self._record("input.request", action="tap", key="F")
+        generation = self._cancel_generation
+        delay = self._f_pre_press_delay()
+        self._record("input.delay", key="F", seconds=delay)
+        self.sleep(delay)
+        if generation != self._cancel_generation:
+            self._record("input.cancelled", action="tap", key="F")
+            return
         self._down("F")
         try:
             self.sleep(0.05)
@@ -251,6 +263,7 @@ class SafeInput:
             self.mouse_held = False
 
     def release_all(self) -> None:
+        self._cancel_generation += 1
         failures: list[tuple[str, Exception]] = []
         for key in tuple(self.held):
             try:
@@ -279,6 +292,12 @@ class SafeInput:
     def _record(self, name: str, **fields: Any) -> None:
         if self.recorder is not None:
             self.recorder.event(name, **fields)
+
+    def _f_pre_press_delay(self) -> float:
+        delay = float(self.random_uniform(0.08, 0.18))
+        if not math.isfinite(delay):
+            raise ValueError("F 按键延迟必须为有限数")
+        return min(0.18, max(0.08, delay))
 
 
 class Win32InputBackend:
