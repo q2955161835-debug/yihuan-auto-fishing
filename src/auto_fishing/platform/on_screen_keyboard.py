@@ -59,7 +59,55 @@ class _Point(ctypes.Structure):
 
 class Win32KeyboardApi:
     def __init__(self, user32: Any | None = None) -> None:
-        self.user32 = user32 or ctypes.WinDLL("user32", use_last_error=True)
+        if user32 is None:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.FindWindowW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR)
+            user32.FindWindowW.restype = wintypes.HWND
+            user32.IsWindow.argtypes = (wintypes.HWND,)
+            user32.IsWindow.restype = wintypes.BOOL
+            user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+            user32.IsWindowVisible.restype = wintypes.BOOL
+            user32.IsIconic.argtypes = (wintypes.HWND,)
+            user32.IsIconic.restype = wintypes.BOOL
+            user32.GetClassNameW.argtypes = (
+                wintypes.HWND,
+                wintypes.LPWSTR,
+                ctypes.c_int,
+            )
+            user32.GetClassNameW.restype = ctypes.c_int
+            user32.GetWindowRect.argtypes = (
+                wintypes.HWND,
+                ctypes.POINTER(_WinRect),
+            )
+            user32.GetWindowRect.restype = wintypes.BOOL
+            user32.GetClientRect.argtypes = (
+                wintypes.HWND,
+                ctypes.POINTER(_WinRect),
+            )
+            user32.GetClientRect.restype = wintypes.BOOL
+            user32.ClientToScreen.argtypes = (
+                wintypes.HWND,
+                ctypes.POINTER(_Point),
+            )
+            user32.ClientToScreen.restype = wintypes.BOOL
+            user32.SetWindowPos.argtypes = (
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.UINT,
+            )
+            user32.SetWindowPos.restype = wintypes.BOOL
+            user32.PostMessageW.argtypes = (
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            )
+            user32.PostMessageW.restype = wintypes.BOOL
+        self.user32 = user32
 
     def find_window(self) -> int:
         return int(self.user32.FindWindowW(_OSK_CLASS, None) or 0)

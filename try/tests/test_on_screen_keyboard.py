@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass
 
 from auto_fishing.model import Rect
@@ -19,6 +21,25 @@ from auto_fishing.platform.on_screen_keyboard import (
 
 MONITOR = Rect(0, 0, 1920, 1080)
 GAME_CLIENT = Rect(0, 0, 1920, 1080)
+
+
+class CallableSlot:
+    def __call__(self, *args: object) -> int:
+        return 1
+
+
+class NativeUser32:
+    def __init__(self) -> None:
+        self.SetWindowPos = CallableSlot()
+        self.FindWindowW = CallableSlot()
+        self.IsWindow = CallableSlot()
+        self.IsWindowVisible = CallableSlot()
+        self.IsIconic = CallableSlot()
+        self.GetClassNameW = CallableSlot()
+        self.GetWindowRect = CallableSlot()
+        self.GetClientRect = CallableSlot()
+        self.ClientToScreen = CallableSlot()
+        self.PostMessageW = CallableSlot()
 
 
 @dataclass
@@ -232,6 +253,24 @@ def test_win32_api_reads_valid_keyboard_geometry_and_positions_bottom_left() -> 
     assert api.window_rect(hwnd) == Rect(80, 80, 1445, 495)
     assert api.client_rect_on_screen(hwnd) == Rect(87, 110, 1437, 487)
     assert user32.positioned == [(55, 0, 776, 1000, 304, 0x0040)]
+
+
+def test_real_win32_api_declares_pointer_width_set_window_pos(monkeypatch) -> None:
+    user32 = NativeUser32()
+    monkeypatch.setattr("ctypes.WinDLL", lambda *args, **kwargs: user32)
+
+    Win32KeyboardApi()
+
+    assert user32.SetWindowPos.argtypes == (
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    )
+    assert user32.SetWindowPos.restype is wintypes.BOOL
 
 
 def test_win32_api_closes_owned_keyboard_with_wm_close() -> None:
