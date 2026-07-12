@@ -7,6 +7,7 @@ from auto_fishing.model import NormalizedRect, Rect, SceneObservation
 from auto_fishing.vision.geometry import crop_normalized
 from auto_fishing.vision.progress import ProgressRecognizer
 from auto_fishing.vision.regions import (
+    BITE_ROI,
     READY_ROI,
     RESULT_CENTER_ROI,
     RESULT_ROI,
@@ -17,35 +18,29 @@ from auto_fishing.vision.regions import (
 
 class BiteDetector:
     def __init__(self) -> None:
-        self.baseline: tuple[float, float, float] | None = None
         self.consecutive = 0
 
     def set_baseline(self, roi: np.ndarray) -> None:
-        self.baseline = self._signature(roi)
         self.consecutive = 0
 
     def detect(self, roi: np.ndarray) -> bool:
-        if self.baseline is None:
-            return False
-
-        current = self._signature(roi)
-        blue_changed = current[0] - self.baseline[0] > 0.03
-        shape_changed = (
-            current[1] - self.baseline[1] > 0.03
-            or current[2] - self.baseline[2] > 0.02
+        white, edges, dark = self._signature(roi)
+        prompt_visible = (
+            0.02 < white < 0.20
+            and edges > 0.02
+            and 0.05 <= dark <= 0.80
         )
-        changed = blue_changed and shape_changed
-        self.consecutive = self.consecutive + 1 if changed else 0
+        self.consecutive = self.consecutive + 1 if prompt_visible else 0
         return self.consecutive >= 2
 
     @staticmethod
     def _signature(roi: np.ndarray) -> tuple[float, float, float]:
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        blue = cv2.inRange(hsv, (90, 100, 80), (135, 255, 255)).mean() / 255
         white = cv2.inRange(hsv, (0, 0, 190), (179, 80, 255)).mean() / 255
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 80, 160).mean() / 255
-        return float(blue), float(white), float(edges)
+        dark = (gray < 60).mean()
+        return float(white), float(edges), float(dark)
 
 
 class SceneRecognizer:
@@ -56,7 +51,7 @@ class SceneRecognizer:
         self.ready_consecutive = 0
 
     def set_bite_baseline(self, client_frame: np.ndarray) -> None:
-        self.bite_detector.set_baseline(crop_normalized(client_frame, READY_ROI))
+        self.bite_detector.set_baseline(crop_normalized(client_frame, BITE_ROI))
 
     def observe(
         self,
@@ -66,6 +61,7 @@ class SceneRecognizer:
         occlusion: Rect | None = None,
     ) -> SceneObservation:
         top = crop_normalized(client_frame, TOP_ROI)
+        bite_roi = crop_normalized(client_frame, BITE_ROI)
         ready_roi = crop_normalized(client_frame, READY_ROI)
         result_center = crop_normalized(client_frame, RESULT_CENTER_ROI)
         result_valid = _valid_mask(
@@ -76,7 +72,7 @@ class SceneRecognizer:
         )
 
         progress = self.progress_recognizer.detect(top, timestamp)
-        bite = self.bite_detector.detect(ready_roi)
+        bite = self.bite_detector.detect(bite_roi)
         result_candidate = (
             progress is None
             and _blue_ratio(result_center, result_valid) > 0.40

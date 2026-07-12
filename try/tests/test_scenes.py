@@ -12,10 +12,20 @@ GREEN_BGR = (200, 255, 0)
 YELLOW_BGR = (0, 230, 255)
 
 
-def bite_frame() -> np.ndarray:
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
-    cv2.circle(image, (50, 50), 35, BLUE_BGR, 8)
-    cv2.circle(image, (50, 50), 15, (255, 255, 255), 5)
+def bite_prompt_frame() -> np.ndarray:
+    image = np.full((100, 100, 3), 80, dtype=np.uint8)
+    cv2.circle(image, (50, 50), 36, (20, 20, 20), -1)
+    cv2.circle(image, (50, 50), 31, (255, 255, 255), 3)
+    cv2.putText(
+        image,
+        "F",
+        (40, 61),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
     return image
 
 
@@ -72,17 +82,27 @@ def add_progress(image: np.ndarray) -> None:
     )
 
 
-def add_bite_to_ready_roi(image: np.ndarray) -> None:
+def add_bite_prompt(image: np.ndarray) -> None:
     height, width = image.shape[:2]
-    roi_short_side = min(round(width * 0.16), round(height * 0.32))
-    center = (round(width * 0.92), round(height * 0.84))
-    cv2.circle(image, center, round(roi_short_side * 0.38), BLUE_BGR, -1)
+    roi_short_side = min(round(width * 0.09), round(height * 0.12))
+    center = (round(width * 0.27), round(height * 0.08))
+    cv2.circle(image, center, round(roi_short_side * 0.30), (20, 20, 20), -1)
     cv2.circle(
         image,
         center,
-        round(roi_short_side * 0.22),
+        round(roi_short_side * 0.26),
         (255, 255, 255),
-        -1,
+        max(2, round(roi_short_side * 0.08)),
+    )
+    cv2.putText(
+        image,
+        "F",
+        (center[0] - round(roi_short_side * 0.13), center[1] + round(roi_short_side * 0.17)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        max(0.4, roi_short_side / 120),
+        (255, 255, 255),
+        max(1, round(roi_short_side * 0.07)),
+        cv2.LINE_AA,
     )
 
 
@@ -106,13 +126,13 @@ def real_result_reference() -> np.ndarray:
     return cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
 
 
-def test_bite_requires_two_changed_frames_and_blue_shape_cross_feature() -> None:
-    base = np.zeros((100, 100, 3), dtype=np.uint8)
+def test_bite_prompt_requires_two_consecutive_left_top_frames() -> None:
+    base = np.full((100, 100, 3), 80, dtype=np.uint8)
     detector = BiteDetector()
     detector.set_baseline(base)
 
-    assert detector.detect(bite_frame()) is False
-    assert detector.detect(bite_frame()) is True
+    assert detector.detect(bite_prompt_frame()) is False
+    assert detector.detect(bite_prompt_frame()) is True
 
 
 def test_bite_confirmation_resets_after_an_unchanged_frame() -> None:
@@ -120,10 +140,10 @@ def test_bite_confirmation_resets_after_an_unchanged_frame() -> None:
     detector = BiteDetector()
     detector.set_baseline(base)
 
-    assert detector.detect(bite_frame()) is False
+    assert detector.detect(bite_prompt_frame()) is False
     assert detector.detect(base) is False
-    assert detector.detect(bite_frame()) is False
-    assert detector.detect(bite_frame()) is True
+    assert detector.detect(bite_prompt_frame()) is False
+    assert detector.detect(bite_prompt_frame()) is True
 
 
 def test_single_white_flash_does_not_trigger_bite() -> None:
@@ -137,12 +157,11 @@ def test_single_white_flash_does_not_trigger_bite() -> None:
     assert detector.detect(flash) is False
 
 
-def test_blue_change_without_shape_change_does_not_trigger_bite() -> None:
-    base = np.full((100, 100, 3), BLUE_BGR, dtype=np.uint8)
-    changed = base.copy()
-    changed[20:80, 20:80] = BLUE_BGR
+def test_dark_cast_transition_without_prompt_does_not_trigger_bite() -> None:
+    base = np.full((100, 100, 3), 80, dtype=np.uint8)
+    changed = np.full((100, 100, 3), 20, dtype=np.uint8)
     detector = BiteDetector()
-    detector.set_baseline(np.zeros_like(base))
+    detector.set_baseline(base)
 
     assert detector.detect(changed) is False
     assert detector.detect(changed) is False
@@ -153,9 +172,9 @@ def test_scene_bite_baseline_and_ready_roi_scale_with_client_resolution(
     size: tuple[int, int],
 ) -> None:
     width, height = size
-    baseline = np.zeros((height, width, 3), dtype=np.uint8)
+    baseline = np.full((height, width, 3), 80, dtype=np.uint8)
     changed = baseline.copy()
-    add_bite_to_ready_roi(changed)
+    add_bite_prompt(changed)
     recognizer = SceneRecognizer()
 
     recognizer.set_bite_baseline(baseline)
@@ -235,14 +254,14 @@ def test_ready_confirmation_resets_when_candidate_disappears() -> None:
     assert recognizer.observe(candidate, 1.5).ready is True
 
 
-def test_ready_rejects_blue_bite_ring_in_ready_roi() -> None:
+def test_ready_can_coexist_with_left_top_bite_prompt() -> None:
     recognizer = SceneRecognizer()
     frame = ready_frame()
-    add_bite_to_ready_roi(frame)
+    add_bite_prompt(frame)
 
     assert recognizer.observe(frame, 1.0).ready is False
     assert recognizer.observe(frame, 1.1).ready is False
-    assert recognizer.observe(frame, 1.2).ready is False
+    assert recognizer.observe(frame, 1.2).ready is True
 
 
 def test_result_and_ready_are_mutually_exclusive() -> None:
