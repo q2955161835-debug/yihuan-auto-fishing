@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 
@@ -42,6 +44,34 @@ def test_detects_green_interval_and_yellow_marker() -> None:
     assert 0.55 < obs.green_right < 0.59
     assert 0.38 < obs.yellow_x < 0.42
     assert obs.timestamp == 1.0
+
+
+def test_real_split_marker_fixture_reconstructs_full_green_interval() -> None:
+    fixture = Path("try/fixtures/progress/progress_split_marker.png")
+    image = cv2.imdecode(
+        np.fromfile(fixture, dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+
+    observation = ProgressRecognizer().detect(image, 1.0)
+
+    assert observation is not None
+    assert observation.green_left < observation.yellow_x < observation.green_right
+    assert observation.green_right - observation.green_left > 0.12
+
+
+def test_marker_sweep_never_loses_bar_when_marker_splits_green() -> None:
+    recognizer = ProgressRecognizer()
+
+    for index, yellow in enumerate(range(75, 166, 3)):
+        observation = recognizer.detect(
+            frame(green=(70, 170), yellow=yellow),
+            index / 30,
+        )
+
+        assert observation is not None
+        assert abs(observation.green_left - 70 / 300) < 0.02
+        assert abs(observation.green_right - 171 / 300) < 0.02
 
 
 def test_controller_moves_toward_inner_safe_band() -> None:

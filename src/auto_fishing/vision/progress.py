@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
 from auto_fishing.model import Direction, ProgressObservation
+
+
+_SCAN_FRACTIONS = (0.40, 0.43, 0.46, 0.49, 0.52)
+_SIDE_EXCLUSION = 0.08
+
+
+@dataclass(frozen=True)
+class _LineCandidate:
+    green_left: int
+    green_right: int
+    yellow_center: float
 
 
 class ProgressRecognizer:
@@ -22,54 +35,55 @@ class ProgressRecognizer:
         green_mask = cv2.morphologyEx(
             green_mask,
             cv2.MORPH_CLOSE,
-            np.ones((3, 9), dtype=np.uint8),
+            np.ones((1, 3), dtype=np.uint8),
         )
 
         image_height, image_width = image.shape[:2]
-        green_boxes = [
-            box
-            for box in _bounding_boxes(green_mask)
-            if box[2] >= image_width * 0.12 and box[3] >= 4
+        rows = [
+            min(image_height - 1, round(image_height * fraction))
+            for fraction in _SCAN_FRACTIONS
         ]
-        yellow_boxes = [
-            box
-            for box in _bounding_boxes(yellow_mask)
-            if (
-                box[3] >= box[2] * 2
-                and box[3] >= image_height * 0.06
-                and box[2] <= max(16, image_width * 0.04)
-            )
+        band_top = min(rows)
+        band_bottom = max(rows) + 1
+        side = round(image_width * _SIDE_EXCLUSION)
+        yellow_band = yellow_mask[band_top:band_bottom, side : image_width - side]
+        yellow_columns = (yellow_band > 0).sum(axis=0) >= 3
+        yellow_runs = _runs(yellow_columns, side)
+        yellow_runs = [
+            run
+            for run in yellow_runs
+            if run[1] - run[0] <= max(16, image_width * 0.04)
         ]
-
-        pairs = [
-            (green_box, yellow_box)
-            for green_box in green_boxes
-            for yellow_box in yellow_boxes
-            if _vertical_overlap(green_box, yellow_box) > 0
-            and _marker_near_green_bar(green_box, yellow_box)
-        ]
-        if not pairs:
+        if not yellow_runs:
             return None
 
-        green_box, yellow_box = max(
-            pairs,
-            key=lambda pair: (
-                _vertical_overlap(*pair) / min(pair[0][3], pair[1][3]),
-                pair[0][2] * pair[0][3],
-            ),
-        )
-        green_x, _, green_width, _ = green_box
-        yellow_x, _, yellow_width, yellow_height = yellow_box
-        width = float(image_width)
-        confidence = min(
+        candidates_by_line = [
+            _line_candidates(
+                _runs(green_mask[row] > 0, 0),
+                yellow_runs,
+                image_width,
+            )
+            for row in rows
+        ]
+        consensus = _consensus(candidates_by_line, image_width)
+        if consensus is None:
+            return None
+        candidate, agreeing_scanlines = consensus
+        green_width = candidate.green_right - candidate.green_left
+        if green_width < image_width * 0.12:
+            return None
+
+        agreement = agreeing_scanlines / len(_SCAN_FRACTIONS)
+        width_score = min(
             1.0,
-            (green_width / width) * 3 + yellow_height / image_height,
-        ) / 2
+            green_width / (image_width * 0.12),
+        )
+        width = float(image_width)
         return ProgressObservation(
-            green_left=green_x / width,
-            green_right=(green_x + green_width) / width,
-            yellow_x=(yellow_x + yellow_width / 2) / width,
-            confidence=confidence,
+            green_left=candidate.green_left / width,
+            green_right=candidate.green_right / width,
+            yellow_x=candidate.yellow_center / width,
+            confidence=(agreement + width_score) / 2,
             timestamp=timestamp,
         )
 
@@ -94,30 +108,115 @@ class ProgressController:
         return Direction.RELEASE
 
 
-def _bounding_boxes(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
-    contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-    return [cv2.boundingRect(contour) for contour in contours]
+def _runs(mask_row: np.ndarray, offset: int) -> list[tuple[int, int]]:
+    active = mask_row.astype(bool)
+    padded = np.pad(active.astype(np.int8), (1, 1))
+    changes = np.diff(padded)
+    starts = np.flatnonzero(changes == 1)
+    ends = np.flatnonzero(changes == -1)
+    return [
+        (int(left + offset), int(right + offset))
+        for left, right in zip(starts, ends)
+    ]
 
 
-def _vertical_overlap(
-    first: tuple[int, int, int, int],
-    second: tuple[int, int, int, int],
-) -> int:
-    first_top, first_bottom = first[1], first[1] + first[3]
-    second_top, second_bottom = second[1], second[1] + second[3]
-    return max(0, min(first_bottom, second_bottom) - max(first_top, second_top))
+def _line_candidates(
+    green_runs: list[tuple[int, int]],
+    yellow_runs: list[tuple[int, int]],
+    image_width: int,
+) -> list[_LineCandidate]:
+    candidates: list[_LineCandidate] = []
+    minimum_width = image_width * 0.12
+    for yellow_left, yellow_right in yellow_runs:
+        yellow_center = (yellow_left + yellow_right) / 2
+        before = [
+            run for run in green_runs if run[1] <= yellow_left + 3
+        ]
+        after = [
+            run for run in green_runs if run[0] >= yellow_right - 3
+        ]
+        if before and after:
+            left_run = max(before, key=lambda run: run[1])
+            right_run = min(after, key=lambda run: run[0])
+            if (
+                yellow_left - left_run[1] <= 3
+                and right_run[0] - yellow_right <= 3
+                and right_run[1] - left_run[0] >= minimum_width
+            ):
+                candidates.append(
+                    _LineCandidate(
+                        left_run[0],
+                        right_run[1],
+                        yellow_center,
+                    )
+                )
+        for green_left, green_right in green_runs:
+            green_width = green_right - green_left
+            margin = max(12.0, green_width * 0.05)
+            if (
+                green_width >= minimum_width
+                and green_left - margin
+                <= yellow_center
+                <= green_right + margin
+            ):
+                candidates.append(
+                    _LineCandidate(
+                        green_left,
+                        green_right,
+                        yellow_center,
+                    )
+                )
+    return candidates
 
 
-def _marker_near_green_bar(
-    green_box: tuple[int, int, int, int],
-    marker_box: tuple[int, int, int, int],
-) -> bool:
-    green_left, _, green_width, _ = green_box
-    marker_left, _, marker_width, _ = marker_box
-    marker_center = marker_left + marker_width / 2
-    margin = max(12, green_width * 0.05)
+def _consensus(
+    candidates_by_line: list[list[_LineCandidate]],
+    image_width: int,
+) -> tuple[_LineCandidate, int] | None:
+    tolerance = image_width * 0.02
+    groups: list[list[_LineCandidate]] = []
+    for line_index, line_candidates in enumerate(candidates_by_line):
+        for seed in line_candidates:
+            matches = [seed]
+            for other_index, other_candidates in enumerate(candidates_by_line):
+                if other_index == line_index:
+                    continue
+                compatible = [
+                    candidate
+                    for candidate in other_candidates
+                    if (
+                        abs(candidate.green_left - seed.green_left) <= tolerance
+                        and abs(candidate.green_right - seed.green_right) <= tolerance
+                    )
+                ]
+                if compatible:
+                    matches.append(
+                        min(
+                            compatible,
+                            key=lambda candidate: (
+                                abs(candidate.green_left - seed.green_left)
+                                + abs(candidate.green_right - seed.green_right)
+                            ),
+                        )
+                    )
+            if len(matches) >= 3:
+                groups.append(matches)
+    if not groups:
+        return None
+    selected = max(
+        groups,
+        key=lambda group: (
+            len(group),
+            np.median([item.green_right - item.green_left for item in group]),
+        ),
+    )
     return (
-        green_left - margin
-        <= marker_center
-        <= green_left + green_width + margin
+        _LineCandidate(
+            green_left=round(np.median([item.green_left for item in selected])),
+            green_right=round(np.median([item.green_right for item in selected])),
+            yellow_center=float(
+                np.median([item.yellow_center for item in selected])
+            ),
+        ),
+        len(selected),
     )
