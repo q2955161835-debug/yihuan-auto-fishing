@@ -34,7 +34,11 @@ class ProgressRecognizer:
         yellow_boxes = [
             box
             for box in _bounding_boxes(yellow_mask)
-            if box[3] >= box[2] * 2 and box[3] >= image_height * 0.12
+            if (
+                box[3] >= box[2] * 2
+                and box[3] >= image_height * 0.06
+                and box[2] <= max(16, image_width * 0.04)
+            )
         ]
 
         pairs = [
@@ -42,6 +46,7 @@ class ProgressRecognizer:
             for green_box in green_boxes
             for yellow_box in yellow_boxes
             if _vertical_overlap(green_box, yellow_box) > 0
+            and _marker_near_green_bar(green_box, yellow_box)
         ]
         if not pairs:
             return None
@@ -99,3 +104,18 @@ def _vertical_overlap(
     first_top, first_bottom = first[1], first[1] + first[3]
     second_top, second_bottom = second[1], second[1] + second[3]
     return max(0, min(first_bottom, second_bottom) - max(first_top, second_top))
+
+
+def _marker_near_green_bar(
+    green_box: tuple[int, int, int, int],
+    marker_box: tuple[int, int, int, int],
+) -> bool:
+    green_left, _, green_width, _ = green_box
+    marker_left, _, marker_width, _ = marker_box
+    marker_center = marker_left + marker_width / 2
+    margin = max(12, green_width * 0.05)
+    return (
+        green_left - margin
+        <= marker_center
+        <= green_left + green_width + margin
+    )

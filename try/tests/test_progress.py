@@ -82,6 +82,25 @@ def test_rejects_yellow_marker_outside_progress_bar_vertical_span() -> None:
     assert ProgressRecognizer().detect(frame(yellow_y=(2, 24)), 1.0) is None
 
 
+def test_detects_thin_marker_just_beyond_green_bar_edge() -> None:
+    image = np.zeros((120, 300, 3), dtype=np.uint8)
+    cv2.rectangle(image, (70, 40), (170, 70), GREEN_BGR, -1)
+    cv2.rectangle(image, (173, 45), (175, 55), YELLOW_BGR, -1)
+    observation = ProgressRecognizer().detect(image, 1.0)
+
+    assert observation is not None
+    assert 0.22 < observation.green_left < 0.26
+    assert 0.57 < observation.yellow_x < 0.59
+
+
+def test_rejects_tall_yellow_ui_outside_green_bar_horizontally() -> None:
+    image = np.zeros((120, 300, 3), dtype=np.uint8)
+    cv2.rectangle(image, (70, 40), (170, 70), GREEN_BGR, -1)
+    cv2.rectangle(image, (10, 34), (16, 100), YELLOW_BGR, -1)
+
+    assert ProgressRecognizer().detect(image, 1.0) is None
+
+
 def test_detects_progress_region_touching_both_horizontal_boundaries() -> None:
     obs = ProgressRecognizer().detect(frame(green=(0, 299), yellow=150), 3.0)
 
