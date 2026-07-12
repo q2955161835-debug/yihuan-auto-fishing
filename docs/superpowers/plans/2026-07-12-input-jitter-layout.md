@@ -153,7 +153,7 @@ def test_window_geometry_leaves_room_for_right_side_status(root) -> None:
     finally:
         root.geometry = original_geometry  # type: ignore[method-assign]
 
-    assert requested == ["400x240+12+34"]
+    assert requested == ["400x240+20+20"]
 ```
 
 - [ ] **Step 2: Run test to verify failure**
