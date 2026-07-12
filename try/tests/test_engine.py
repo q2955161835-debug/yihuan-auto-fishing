@@ -5,6 +5,7 @@ import time
 import json
 from collections.abc import Callable
 
+import cv2
 import numpy as np
 import pytest
 
@@ -1313,6 +1314,46 @@ def test_engine_pauses_with_e_osk_when_keyboard_reposition_fails(tmp_path) -> No
     assert core.pause_code == "E_OSK"
     assert "屏幕键盘被关闭" in core.snapshot.error
     assert input_service.events[-1] == "release"
+
+
+def test_progress_loss_saves_only_the_newest_twelve_progress_strips(
+    tmp_path,
+) -> None:
+    engine, _core, _input, _window, _source = make_engine(tmp_path)
+    for index in range(15):
+        frame = np.full((120, 300, 3), index * 10, dtype=np.uint8)
+        engine._remember_progress_frame(frame, FishingState.CONTROL)
+
+    engine._pause(
+        "E_PROGRESS_LOST",
+        "连续六帧未识别进度条",
+        np.zeros((120, 300, 3), dtype=np.uint8),
+    )
+
+    path = next((tmp_path / "diagnostics").glob("*_progress.jpg"))
+    sheet = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    tile_height = sheet.shape[0] // 3
+    tile_width = sheet.shape[1] // 4
+    assert abs(float(sheet[:tile_height, :tile_width].mean()) - 30) < 3
+    assert abs(float(sheet[-tile_height:, -tile_width:].mean()) - 140) < 3
+
+
+def test_non_progress_failure_does_not_save_progress_contact_sheet(
+    tmp_path,
+) -> None:
+    engine, _core, _input, _window, _source = make_engine(tmp_path)
+    engine._remember_progress_frame(
+        np.zeros((120, 300, 3), dtype=np.uint8),
+        FishingState.CONTROL,
+    )
+
+    engine._pause(
+        "E_WINDOW",
+        "窗口失效",
+        np.zeros((120, 300, 3), dtype=np.uint8),
+    )
+
+    assert list((tmp_path / "diagnostics").glob("*_progress.jpg")) == []
 
 
 def test_output_restart_discards_packet_from_previous_capture_source(tmp_path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -21,6 +22,8 @@ from auto_fishing.model import (
     SceneObservation,
 )
 from auto_fishing.storage.runtime_logging import RuntimeLogError
+from auto_fishing.vision.geometry import crop_normalized
+from auto_fishing.vision.regions import TOP_ROI
 
 
 class InputActionError(RuntimeError):
@@ -347,6 +350,7 @@ class AutomationEngine:
         self._pause_lock = threading.RLock()
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
+        self._progress_frames: deque[np.ndarray] = deque(maxlen=12)
         self._last_refresh = float("-inf")
         self._last_logged_status: tuple[str, int, int, str] | None = None
 
@@ -423,6 +427,7 @@ class AutomationEngine:
                 start_epoch = self._pause_epoch
             self._diagnostic_recorded = False
             self._last_frame = None
+            self._progress_frames.clear()
             self._last_refresh = float("-inf")
             self._last_logged_status = None
 
@@ -668,6 +673,7 @@ class AutomationEngine:
             self.core.cancel_current(self.clock())
             self._diagnostic_recorded = False
             self._last_frame = None
+            self._progress_frames.clear()
             self._last_refresh = float("-inf")
             self._publish()
         finally:
@@ -898,6 +904,7 @@ class AutomationEngine:
                     fps=packet.fps,
                 )
                 state_before = self.core.snapshot.state
+                self._remember_progress_frame(client_frame, state_before)
                 try:
                     snapshot = self.core.process(
                         observation,
@@ -1039,7 +1046,16 @@ class AutomationEngine:
                 save_diagnostic_now = True
         if save_diagnostic_now:
             try:
-                self.diagnostics.save(frame, actual_code, actual_detail)
+                self.diagnostics.save(
+                    frame,
+                    actual_code,
+                    actual_detail,
+                    progress_frames=(
+                        tuple(self._progress_frames)
+                        if actual_code == "E_PROGRESS_LOST"
+                        else ()
+                    ),
+                )
             except Exception as error:
                 self.logger.warning("保存诊断失败: %s", error)
         self._publish()
@@ -1158,6 +1174,19 @@ class AutomationEngine:
                 frame_timestamp=frame_timestamp,
                 now_monotonic=now_monotonic,
             )
+
+    def _remember_progress_frame(
+        self,
+        client_frame: np.ndarray,
+        state: FishingState,
+    ) -> None:
+        if state not in {FishingState.WAIT_BAR, FishingState.CONTROL}:
+            self._progress_frames.clear()
+            return
+        top = crop_normalized(client_frame, TOP_ROI)
+        height = top.shape[0]
+        band = top[round(height * 0.40) : round(height * 0.52)]
+        self._progress_frames.append(np.ascontiguousarray(band).copy())
 
     def _raise_if_runtime_log_failed(self) -> None:
         if self.runtime_log is not None:

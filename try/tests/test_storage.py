@@ -104,6 +104,46 @@ def test_diagnostics_same_timestamp_and_code_create_distinct_groups(tmp_path):
     assert len(list((tmp_path / "diagnostics").glob("*.json"))) == 2
 
 
+def test_diagnostics_save_twelve_progress_frames_as_contact_sheet(
+    tmp_path,
+) -> None:
+    store = DiagnosticsStore(tmp_path / "diagnostics")
+    frames = [
+        np.full((24, 120, 3), index, dtype=np.uint8)
+        for index in range(12)
+    ]
+
+    stem = store.save(
+        np.zeros((60, 80, 3), dtype=np.uint8),
+        "E_PROGRESS_LOST",
+        "lost",
+        progress_frames=frames,
+    )
+
+    path = tmp_path / "diagnostics" / f"{stem}_progress.jpg"
+    sheet = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert sheet.shape[:2] == (24 * 3, 120 * 4)
+
+
+def test_diagnostics_cleanup_removes_progress_contact_sheet_with_incident(
+    tmp_path,
+) -> None:
+    store = DiagnosticsStore(tmp_path / "diagnostics")
+    old = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    store.save(
+        np.zeros((60, 80, 3), dtype=np.uint8),
+        "E_PROGRESS_LOST",
+        "lost",
+        old,
+        progress_frames=[np.zeros((24, 120, 3), dtype=np.uint8)],
+    )
+
+    store.cleanup(now)
+
+    assert list((tmp_path / "diagnostics").iterdir()) == []
+
+
 def test_runtime_log_writes_jsonl_and_480px_jpeg(tmp_path):
     store = RuntimeLogStore(tmp_path / "runs", queue_size=3)
     run_dir = store.start()
