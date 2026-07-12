@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_manifest_requests_as_invoker_and_per_monitor_v2_dpi():
+def test_manifest_requests_administrator_and_per_monitor_v2_dpi():
     manifest = ROOT / "packaging" / "app.manifest"
 
     tree = ET.parse(manifest)
@@ -19,7 +19,8 @@ def test_manifest_requests_as_invoker_and_per_monitor_v2_dpi():
         element for element in root.iter() if element.tag.endswith("dpiAwareness")
     )
 
-    assert execution_level.attrib["level"] == "asInvoker"
+    assert execution_level.attrib["level"] == "requireAdministrator"
+    assert execution_level.attrib["uiAccess"] == "false"
     assert dpi_awareness.text == "PerMonitorV2"
 
 

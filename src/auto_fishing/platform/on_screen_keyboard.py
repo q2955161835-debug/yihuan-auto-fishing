@@ -20,6 +20,10 @@ class OnScreenKeyboardPositionDenied(OnScreenKeyboardError):
     """Raised when Windows protects the accessibility window from movement."""
 
 
+class OnScreenKeyboardCloseDenied(OnScreenKeyboardError):
+    """Raised when Windows protects the accessibility window from closing."""
+
+
 @dataclass(frozen=True)
 class KeyboardGeometry:
     hwnd: int
@@ -133,9 +137,15 @@ class Win32KeyboardApi:
 
     def close_window(self, hwnd: int) -> None:
         if not self.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0):
-            raise OnScreenKeyboardError(
+            error_code = ctypes.get_last_error()
+            error_type = (
+                OnScreenKeyboardCloseDenied
+                if error_code == 5
+                else OnScreenKeyboardError
+            )
+            raise error_type(
                 "无法关闭本程序启动的 Windows 屏幕键盘；"
-                f"Windows 错误 {ctypes.get_last_error()}"
+                f"Windows 错误 {error_code}"
             )
 
 
@@ -248,7 +258,13 @@ class OnScreenKeyboardWindow:
         self._hwnd = 0
         self._geometry = None
         if self._owned and hwnd:
-            self.api.close_window(hwnd)
+            try:
+                self.api.close_window(hwnd)
+            except OnScreenKeyboardCloseDenied:
+                # OSK is a protected accessibility window on some Windows builds.
+                # Leaving it open is safer than treating cleanup as an automation
+                # failure or force-terminating a system-owned process.
+                pass
         self._owned = False
 
     def _read_geometry(self, hwnd: int) -> KeyboardGeometry:
