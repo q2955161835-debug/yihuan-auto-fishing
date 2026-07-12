@@ -798,6 +798,90 @@ def test_core_releases_on_first_missing_bar_and_pauses_at_six_frames() -> None:
     assert "连续六帧" in core.snapshot.error
 
 
+def clean_progress_disappearance() -> SceneObservation:
+    return SceneObservation(
+        progress_scanlines=0,
+        progress_candidates=0,
+        progress_rejection="yellow_missing",
+    )
+
+
+def test_stable_control_then_three_clean_missing_frames_waits_result() -> None:
+    core, input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    progress = ProgressObservation(0.3, 0.7, 0.5, 1.0, 0.0)
+    for index in range(15):
+        core.process(
+            SceneObservation(progress=progress),
+            None,
+            0.1 + index / 30,
+            CLIENT,
+        )
+    for index in range(3):
+        core.process(
+            clean_progress_disappearance(),
+            None,
+            1.0 + index / 30,
+            CLIENT,
+        )
+
+    assert core.snapshot.state is FishingState.WAIT_RESULT
+    assert input_service.events[-1] == "release"
+    assert "F" not in input_service.events
+
+
+def test_two_clean_missing_frames_then_recovery_stays_control() -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    progress = ProgressObservation(0.3, 0.7, 0.5, 1.0, 0.0)
+    for index in range(15):
+        core.process(
+            SceneObservation(progress=progress),
+            None,
+            0.1 + index / 30,
+            CLIENT,
+        )
+    core.process(clean_progress_disappearance(), None, 1.0, CLIENT)
+    core.process(clean_progress_disappearance(), None, 1.1, CLIENT)
+    core.process(SceneObservation(progress=progress), None, 1.2, CLIENT)
+
+    assert core.snapshot.state is FishingState.CONTROL
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        clean_progress_disappearance(),
+        SceneObservation(
+            progress_scanlines=2,
+            progress_candidates=3,
+            progress_rejection="no_consensus",
+        ),
+    ],
+)
+def test_early_or_ambiguous_loss_still_pauses(
+    missing: SceneObservation,
+) -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    progress = ProgressObservation(0.3, 0.7, 0.5, 1.0, 0.0)
+    for index in range(14):
+        core.process(
+            SceneObservation(progress=progress),
+            None,
+            0.1 + index / 30,
+            CLIENT,
+        )
+    for index in range(6):
+        core.process(missing, None, 1.0 + index / 30, CLIENT)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_PROGRESS_LOST"
+
+
 def test_core_requires_two_result_candidates_before_leaving_control() -> None:
     core, input_service, _state_machine = make_core(state=FishingState.CONTROL)
 

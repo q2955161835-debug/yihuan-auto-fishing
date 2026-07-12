@@ -62,6 +62,7 @@ class AutomationCore:
         self.input_service = input_service
         self.scene_recognizer = scene_recognizer
         self.bar_missing_frames = 0
+        self.bar_valid_frames = 0
         self.result_candidate_frames = 0
         self.pause_code = ""
         self._error = ""
@@ -84,6 +85,7 @@ class AutomationCore:
         with self._lock:
             self.state_machine.start(target, now)
             self.bar_missing_frames = 0
+            self.bar_valid_frames = 0
             self.result_candidate_frames = 0
             self.pause_code = ""
             self._error = ""
@@ -154,6 +156,7 @@ class AutomationCore:
 
             self.state_machine.handle(event, now)
             self.bar_missing_frames = 0
+            self.bar_valid_frames = 0
             self.result_candidate_frames = 0
             self.pause_code = ""
             self._error = ""
@@ -169,6 +172,7 @@ class AutomationCore:
                 raise InputActionError(str(error)) from error
             self.state_machine.cancel_current(now)
             self.bar_missing_frames = 0
+            self.bar_valid_frames = 0
             self.result_candidate_frames = 0
             self.pause_code = ""
             self._error = ""
@@ -258,6 +262,7 @@ class AutomationCore:
     def _control(self, observation: SceneObservation, now: float) -> None:
         if observation.progress is not None:
             self.bar_missing_frames = 0
+            self.bar_valid_frames += 1
             self.result_candidate_frames = 0
             direction = self.controller.decide(observation.progress)
             self._input(lambda: self.input_service.set_direction(direction))
@@ -272,7 +277,21 @@ class AutomationCore:
         self._input(self.input_service.release_all)
         if observation.result_candidate:
             if self.result_candidate_frames >= 2:
+                self.bar_valid_frames = 0
                 self.state_machine.handle(Event.BAR_GONE, now)
+            return
+        clean_disappearance = (
+            observation.progress_scanlines == 0
+            and observation.progress_candidates == 0
+            and observation.progress_rejection == "yellow_missing"
+        )
+        if (
+            self.bar_valid_frames >= 15
+            and self.bar_missing_frames >= 3
+            and clean_disappearance
+        ):
+            self.bar_valid_frames = 0
+            self.state_machine.handle(Event.BAR_GONE, now)
             return
         if self.bar_missing_frames >= 6:
             self.pause(
