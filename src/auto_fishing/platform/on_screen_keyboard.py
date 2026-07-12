@@ -16,6 +16,10 @@ class OnScreenKeyboardError(RuntimeError):
     """Raised when the Windows on-screen keyboard cannot be used safely."""
 
 
+class OnScreenKeyboardPositionDenied(OnScreenKeyboardError):
+    """Raised when Windows protects the accessibility window from movement."""
+
+
 @dataclass(frozen=True)
 class KeyboardGeometry:
     hwnd: int
@@ -88,9 +92,15 @@ class Win32KeyboardApi:
             _SWP_SHOWWINDOW,
         )
         if not positioned:
-            raise OnScreenKeyboardError(
+            error_code = ctypes.get_last_error()
+            error_type = (
+                OnScreenKeyboardPositionDenied
+                if error_code == 5
+                else OnScreenKeyboardError
+            )
+            raise error_type(
                 "无法将 Windows 屏幕键盘定位到左下角；"
-                f"Windows 错误 {ctypes.get_last_error()}"
+                f"Windows 错误 {error_code}"
             )
 
     def window_rect(self, hwnd: int) -> Rect:
@@ -203,15 +213,27 @@ class OnScreenKeyboardWindow:
         if not hwnd:
             raise OnScreenKeyboardError("启动 Windows 屏幕键盘超时")
 
-        self.api.position_bottom_left(
-            hwnd,
-            monitor_rect,
-            round(game_client.width * 0.80),
-        )
-        self.api.validate_window(hwnd)
         self._hwnd = hwnd
+        position_denied: OnScreenKeyboardPositionDenied | None = None
+        try:
+            self.api.position_bottom_left(
+                hwnd,
+                monitor_rect,
+                round(game_client.width * 0.80),
+            )
+        except OnScreenKeyboardPositionDenied as error:
+            position_denied = error
+        self.api.validate_window(hwnd)
         self._geometry = self._read_geometry(hwnd)
-        self._validate_placement(self._geometry, monitor_rect, game_client)
+        try:
+            self._validate_placement(self._geometry, monitor_rect, game_client)
+        except OnScreenKeyboardError as error:
+            if position_denied is not None:
+                raise OnScreenKeyboardError(
+                    "Windows 不允许程序移动系统屏幕键盘；"
+                    "请手动拖到游戏左下角后重新绑定"
+                ) from position_denied
+            raise error
         return self._geometry
 
     def geometry(self) -> KeyboardGeometry:

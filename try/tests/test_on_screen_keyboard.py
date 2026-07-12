@@ -10,6 +10,7 @@ from auto_fishing.platform.on_screen_keyboard import (
     OskLauncher,
     OnScreenKeyboardError,
     OnScreenKeyboardInputBackend,
+    OnScreenKeyboardPositionDenied,
     OnScreenKeyboardWindow,
     Win32KeyboardApi,
 )
@@ -34,10 +35,12 @@ class FakeKeyboardApi:
         *,
         window_rect: Rect = Rect(0, 665, 1365, 1080),
         client_rect: Rect = Rect(7, 695, 1357, 1072),
+        position_error: Exception | None = None,
     ) -> None:
         self.find_results = list(find_results)
         self._window_rect = window_rect
         self._client_rect = client_rect
+        self.position_error = position_error
         self.positioned: list[tuple[int, Rect, int]] = []
         self.closed: list[int] = []
 
@@ -53,6 +56,8 @@ class FakeKeyboardApi:
         max_width: int,
     ) -> None:
         self.positioned.append((hwnd, monitor_rect, max_width))
+        if self.position_error is not None:
+            raise self.position_error
 
     def validate_window(self, hwnd: int) -> None:
         assert hwnd in {55, 77}
@@ -156,6 +161,7 @@ class FakeUser32:
     def __init__(self) -> None:
         self.positioned: list[tuple[int, int, int, int, int, int]] = []
         self.messages: list[tuple[int, int]] = []
+        self.position_result = 1
 
     def FindWindowW(self, class_name: str, title: object) -> int:
         assert class_name == "OSKMainClass"
@@ -202,7 +208,7 @@ class FakeUser32:
         flags: int,
     ) -> int:
         self.positioned.append((hwnd, x, y, width, height, flags))
-        return 1
+        return self.position_result
 
     def PostMessageW(self, hwnd: int, message: int, wparam: int, lparam: int) -> int:
         self.messages.append((hwnd, message))
@@ -229,6 +235,16 @@ def test_win32_api_closes_owned_keyboard_with_wm_close() -> None:
     api.close_window(55)
 
     assert user32.messages == [(55, 0x0010)]
+
+
+def test_win32_api_distinguishes_access_denied_position_error(monkeypatch) -> None:
+    user32 = FakeUser32()
+    user32.position_result = 0
+    monkeypatch.setattr("ctypes.get_last_error", lambda: 5)
+    api = Win32KeyboardApi(user32=user32)
+
+    with pytest.raises(OnScreenKeyboardPositionDenied, match="Windows 错误 5"):
+        api.position_bottom_left(55, MONITOR, 1000)
 
 
 class FakeShell32:
@@ -300,6 +316,41 @@ def test_ensure_rejects_keyboard_over_critical_recognition_regions(
 
     with pytest.raises(OnScreenKeyboardError, match="遮挡关键识别区域"):
         keyboard.ensure(MONITOR, Rect(0, 0, 1920, 1080))
+
+
+def test_ensure_accepts_safe_existing_position_when_windows_denies_move() -> None:
+    api = FakeKeyboardApi(
+        [55],
+        position_error=OnScreenKeyboardPositionDenied("Windows 错误 5"),
+    )
+    keyboard = OnScreenKeyboardWindow(
+        api=api,
+        launcher=FakeLauncher(),
+        sleep=lambda _: None,
+    )
+
+    geometry = keyboard.ensure(MONITOR, GAME_CLIENT)
+
+    assert geometry.window_rect == Rect(0, 665, 1365, 1080)
+
+
+def test_ensure_keeps_owned_handle_when_manual_position_is_required() -> None:
+    api = FakeKeyboardApi(
+        [0, 77],
+        window_rect=Rect(400, 0, 1400, 400),
+        position_error=OnScreenKeyboardPositionDenied("Windows 错误 5"),
+    )
+    keyboard = OnScreenKeyboardWindow(
+        api=api,
+        launcher=FakeLauncher(),
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(OnScreenKeyboardError, match="请手动拖到游戏左下角"):
+        keyboard.ensure(MONITOR, GAME_CLIENT)
+    keyboard.close()
+
+    assert api.closed == [77]
 
 
 class ReadyKeyboard:
