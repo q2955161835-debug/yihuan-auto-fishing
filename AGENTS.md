@@ -30,8 +30,9 @@
 - `src/auto_fishing/vision/`：上钩、进度条、黄色标记、绿色区域、结算和就绪画面识别。
 - `src/auto_fishing/automation/`：状态机、超时、循环计数、暂停与恢复。
 - `src/auto_fishing/storage/`：本地配置、异常诊断和完整运行记录的异步落盘与清理。
-- `packaging/`：`requireAdministrator`、`PerMonitorV2` 清单和 PyInstaller 单文件规格；发布物启动时请求 UAC（用户账户控制）提升，不得启用控制台子系统。
+- `packaging/`：`requireAdministrator`、`PerMonitorV2` 清单和 PyInstaller 单文件规格；规格文件必须同时设置 `uac_admin=True`，否则 PyInstaller 会把自定义清单重写为 `asInvoker`。发布物启动时请求 UAC（用户账户控制）提升，不得启用控制台子系统。
 - `scripts/build.ps1`：默认从项目 `.venv` 运行完整测试后构建单文件发布物并输出 SHA256；干净环境验收可用 `-PythonPath` 参数或 `AUTO_FISHING_PYTHON` 环境变量指定解释器。
+- `scripts/verify_release.py`：读取最终 EXE 的 `RT_MANIFEST` 内嵌资源，构建后强制验证 `requireAdministrator` 与 `uiAccess=false`，不得只检查源 XML。
 - `try/`：测试、合成帧、回放输入和临时产物；删除后不得影响正式程序。
 - `try/smoke_exe.ps1`：以启动器 PID 为根递归跟踪所属进程树，检查窗口响应并只关闭本次烟雾拥有的进程；不得按可执行文件路径批量判定或终止进程。
 - `流程截图/`：用户提供的带标注流程参考图，不作为可直接匹配的干净模板。

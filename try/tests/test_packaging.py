@@ -1,5 +1,8 @@
 from pathlib import Path
+import importlib.util
 import xml.etree.ElementTree as ET
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +38,7 @@ def test_pyinstaller_spec_builds_single_windowed_executable():
     assert "console=False" in spec
     assert "upx=False" in spec
     assert "app.manifest" in spec
+    assert "uac_admin=True" in spec
     assert "COLLECT(" not in spec
     assert "--uac-admin" not in spec
 
@@ -46,7 +50,43 @@ def test_build_script_gates_packaging_on_tests_and_prints_sha256():
     assert "-m pytest" in script
     assert "-m PyInstaller" in script
     assert "dist\\异环自动钓鱼.exe" in script
+    assert "scripts\\verify_release.py" in script
     assert "Get-FileHash -Algorithm SHA256" in script
+
+
+def test_release_verifier_rejects_as_invoker_manifest() -> None:
+    verifier_path = ROOT / "scripts" / "verify_release.py"
+    spec = importlib.util.spec_from_file_location("verify_release", verifier_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    as_invoker = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+      <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security>
+        <requestedPrivileges><requestedExecutionLevel level="asInvoker" uiAccess="false"/></requestedPrivileges>
+      </security></trustInfo>
+    </assembly>'''
+
+    with pytest.raises(RuntimeError, match="requireAdministrator"):
+        module.validate_manifest(as_invoker)
+
+
+def test_release_verifier_accepts_administrator_manifest() -> None:
+    verifier_path = ROOT / "scripts" / "verify_release.py"
+    spec = importlib.util.spec_from_file_location("verify_release_ok", verifier_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    administrator = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+      <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security>
+        <requestedPrivileges><requestedExecutionLevel level="requireAdministrator" uiAccess="false"/></requestedPrivileges>
+      </security></trustInfo>
+    </assembly>'''
+
+    module.validate_manifest(administrator)
 
 
 def test_build_script_accepts_python_override_and_keeps_project_venv_default():
