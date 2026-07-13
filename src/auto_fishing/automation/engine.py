@@ -30,6 +30,8 @@ from auto_fishing.vision.regions import TOP_ROI
 
 _RESULT_CLICK_DELAY_MIN = 3.10
 _RESULT_CLICK_DELAY_MAX = 3.60
+_STRUCTURED_PROGRESS_LOSS_LIMIT = 60
+_BLANK_PROGRESS_LOSS_LIMIT = 6
 
 
 class InputActionError(RuntimeError):
@@ -71,7 +73,8 @@ class AutomationCore:
         self.scene_recognizer = scene_recognizer
         self.random_uniform = random_uniform
         self.event_recorder = event_recorder
-        self.bar_missing_frames = 0
+        self.structured_missing_frames = 0
+        self.blank_missing_frames = 0
         self.bar_valid_frames = 0
         self.result_next_click_at: float | None = None
         self.pause_code = ""
@@ -94,7 +97,7 @@ class AutomationCore:
     def start(self, target: int, now: float) -> None:
         with self._lock:
             self.state_machine.start(target, now)
-            self.bar_missing_frames = 0
+            self._reset_progress_tracking()
             self.bar_valid_frames = 0
             self._reset_result_dismissal()
             self.pause_code = ""
@@ -165,7 +168,7 @@ class AutomationCore:
                 return False
 
             self.state_machine.handle(event, now)
-            self.bar_missing_frames = 0
+            self._reset_progress_tracking()
             self.bar_valid_frames = 0
             self._reset_result_dismissal()
             if self.state_machine.state is FishingState.WAIT_RESULT:
@@ -187,7 +190,7 @@ class AutomationCore:
             except Exception as error:
                 raise InputActionError(str(error)) from error
             self.state_machine.cancel_current(now)
-            self.bar_missing_frames = 0
+            self._reset_progress_tracking()
             self.bar_valid_frames = 0
             self._reset_result_dismissal()
             self.pause_code = ""
@@ -274,14 +277,33 @@ class AutomationCore:
 
     def _control(self, observation: SceneObservation, now: float) -> None:
         if observation.progress is not None:
-            self.bar_missing_frames = 0
+            self._reset_progress_tracking()
             self.bar_valid_frames += 1
             direction = self.controller.decide(observation.progress)
             self._input(lambda: self.input_service.set_direction(direction))
             return
 
-        self.bar_missing_frames += 1
         self._input(self.input_service.release_all)
+        has_structure = (
+            observation.progress_scanlines > 0
+            or observation.progress_candidates > 0
+        )
+        if has_structure:
+            self.structured_missing_frames += 1
+            self.blank_missing_frames = 0
+            if (
+                self.structured_missing_frames
+                >= _STRUCTURED_PROGRESS_LOSS_LIMIT
+            ):
+                self.pause(
+                    "连续六十帧进度条结构不稳定",
+                    now,
+                    code="E_PROGRESS_LOST",
+                )
+            return
+
+        self.blank_missing_frames += 1
+        self.structured_missing_frames = 0
         clean_disappearance = (
             observation.progress_scanlines == 0
             and observation.progress_candidates == 0
@@ -289,13 +311,13 @@ class AutomationCore:
         )
         if (
             self.bar_valid_frames >= 15
-            and self.bar_missing_frames >= 3
+            and self.blank_missing_frames >= 3
             and clean_disappearance
         ):
             self.bar_valid_frames = 0
             self._enter_wait_result(now)
             return
-        if self.bar_missing_frames >= 6:
+        if self.blank_missing_frames >= _BLANK_PROGRESS_LOSS_LIMIT:
             self.pause(
                 "连续六帧未识别进度条",
                 now,
@@ -389,6 +411,10 @@ class AutomationCore:
 
     def _reset_result_dismissal(self) -> None:
         self.result_next_click_at = None
+
+    def _reset_progress_tracking(self) -> None:
+        self.structured_missing_frames = 0
+        self.blank_missing_frames = 0
 
     def _record(self, name: str, **fields: object) -> None:
         if self.event_recorder is not None:

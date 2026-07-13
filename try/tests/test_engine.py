@@ -982,6 +982,14 @@ def clean_progress_disappearance() -> SceneObservation:
     )
 
 
+def structured_progress_ambiguity() -> SceneObservation:
+    return SceneObservation(
+        progress_scanlines=4,
+        progress_candidates=8,
+        progress_rejection="bar_too_narrow",
+    )
+
+
 def test_stable_control_then_three_clean_missing_frames_waits_result() -> None:
     core, input_service, _state_machine = make_core(
         state=FishingState.CONTROL
@@ -1026,20 +1034,7 @@ def test_two_clean_missing_frames_then_recovery_stays_control() -> None:
     assert core.snapshot.state is FishingState.CONTROL
 
 
-@pytest.mark.parametrize(
-    "missing",
-    [
-        clean_progress_disappearance(),
-        SceneObservation(
-            progress_scanlines=2,
-            progress_candidates=3,
-            progress_rejection="no_consensus",
-        ),
-    ],
-)
-def test_early_or_ambiguous_loss_still_pauses(
-    missing: SceneObservation,
-) -> None:
+def test_early_blank_loss_still_pauses() -> None:
     core, _input_service, _state_machine = make_core(
         state=FishingState.CONTROL
     )
@@ -1052,10 +1047,73 @@ def test_early_or_ambiguous_loss_still_pauses(
             CLIENT,
         )
     for index in range(6):
-        core.process(missing, None, 1.0 + index / 30, CLIENT)
+        core.process(
+            clean_progress_disappearance(),
+            None,
+            1.0 + index / 30,
+            CLIENT,
+        )
 
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_PROGRESS_LOST"
+
+
+def test_structured_progress_ambiguity_pauses_on_sixtieth_frame() -> None:
+    core, input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    missing = structured_progress_ambiguity()
+
+    for index in range(59):
+        core.process(missing, None, index / 30, CLIENT)
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert input_service.events[-1] == "release"
+    assert not any(
+        event in {"left", "right"} for event in input_service.events
+    )
+
+    core.process(missing, None, 59 / 30, CLIENT)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_PROGRESS_LOST"
+    assert "六十帧" in core.snapshot.error
+
+
+def test_valid_progress_resets_structured_ambiguity_counter() -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    missing = structured_progress_ambiguity()
+    progress = ProgressObservation(0.3, 0.7, 0.5, 1.0, 0.0)
+    for index in range(59):
+        core.process(missing, None, index / 30, CLIENT)
+
+    core.process(SceneObservation(progress=progress), None, 2.0, CLIENT)
+    core.process(missing, None, 2.1, CLIENT)
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert core.structured_missing_frames == 1
+    assert core.blank_missing_frames == 0
+
+
+def test_switching_missing_class_starts_blank_count_from_one() -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    for index in range(59):
+        core.process(
+            structured_progress_ambiguity(),
+            None,
+            index / 30,
+            CLIENT,
+        )
+
+    core.process(SceneObservation(), None, 2.0, CLIENT)
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert core.blank_missing_frames == 1
+    assert core.structured_missing_frames == 0
 
 
 def test_result_candidates_do_not_end_control() -> None:
@@ -1265,7 +1323,8 @@ def test_core_stale_frame_releases_after_point_two_and_pauses_after_point_five()
     )
     assert core.snapshot.state is FishingState.CONTROL
     assert input_service.events[-1] == "release"
-    assert core.bar_missing_frames == 0
+    assert core.structured_missing_frames == 0
+    assert core.blank_missing_frames == 0
 
     core.process(
         SceneObservation(), FramePacket(frame, 1.0, 30.0), 1.6, None
