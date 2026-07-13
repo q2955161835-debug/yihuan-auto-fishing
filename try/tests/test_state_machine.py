@@ -118,6 +118,10 @@ def test_inter_round_waits_one_second_before_returning_ready() -> None:
     assert state_machine.entered_at == 2.0
 
 
+def test_inter_round_is_not_a_generic_timeout_state() -> None:
+    assert FishingState.INTER_ROUND not in TIMEOUTS
+
+
 def test_early_inter_round_event_is_illegal_without_mutation() -> None:
     state_machine = FishingStateMachine()
     state_machine.start(2, 0.0)

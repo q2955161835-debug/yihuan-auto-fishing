@@ -34,8 +34,9 @@ TIMEOUTS = {
     FishingState.WAIT_BAR: 8.0,
     FishingState.CONTROL: 120.0,
     FishingState.WAIT_RESULT: 10.0,
-    FishingState.INTER_ROUND: 1.0,
 }
+
+_INTER_ROUND_DELAY = 1.0
 
 
 class FishingStateMachine:
@@ -83,7 +84,7 @@ class FishingStateMachine:
         if (
             self.state is FishingState.INTER_ROUND
             and event is Event.INTERVAL_ELAPSED
-            and now - self.entered_at < TIMEOUTS[FishingState.INTER_ROUND]
+            and now - self.entered_at < _INTER_ROUND_DELAY
         ):
             raise ValueError(f"illegal event {event.name} before interval elapsed")
 
@@ -115,7 +116,7 @@ class FishingStateMachine:
     def check_interval(self, now: float) -> bool:
         return (
             self.state is FishingState.INTER_ROUND
-            and now - self.entered_at >= TIMEOUTS[FishingState.INTER_ROUND]
+            and now - self.entered_at >= _INTER_ROUND_DELAY
         )
 
     def snapshot(self, fps: float = 0.0, error: str = "") -> RuntimeSnapshot:

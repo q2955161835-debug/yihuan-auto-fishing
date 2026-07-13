@@ -897,6 +897,23 @@ def test_timed_result_click_counts_only_once_without_followup_observation() -> N
     } in runtime_log.events
 
 
+def test_inter_round_interval_precedes_generic_timeout() -> None:
+    core, input_service, state_machine = make_core()
+    core.start(2, 0.0)
+    state_machine.handle(Event.CAST_SENT, 0.1)
+    state_machine.handle(Event.REEL_SENT, 0.2)
+    state_machine.handle(Event.BAR_DETECTED, 0.3)
+    state_machine.handle(Event.BAR_GONE, 0.4)
+    state_machine.handle(Event.RESULT_CLICKED, 1.0)
+
+    core.process(SceneObservation(), None, 2.001, CLIENT)
+    assert core.snapshot.state is FishingState.READY
+    core.process(SceneObservation(), None, 2.002, CLIENT)
+
+    assert core.snapshot.state is FishingState.WAIT_BITE
+    assert input_service.events.count("F") == 1
+
+
 def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> None:
     samples: list[tuple[float, float]] = []
 
