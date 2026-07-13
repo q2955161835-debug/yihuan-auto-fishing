@@ -1734,6 +1734,93 @@ def test_engine_start_checks_foreground_without_forcing_activation(
         engine.shutdown()
 
 
+def test_engine_start_explicit_activation_switches_before_start(tmp_path) -> None:
+    window_service = ActivatingWindowService([])
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+
+    engine.start(1, activate=True)
+    try:
+        wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+
+        assert window_service.activate_calls == 1
+        assert input_service.events.count("F") == 1
+    finally:
+        engine.shutdown()
+
+
+def test_engine_start_activation_failure_sends_no_input(tmp_path) -> None:
+    window_service = ActivatingWindowService([])
+    window_service.activate_succeeds = False
+    engine, _core, input_service, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+
+    with pytest.raises(RuntimeError, match="自动切换到游戏失败"):
+        engine.start(1, activate=True)
+
+    assert engine.is_running is False
+    assert window_service.activate_calls == 1
+    assert "F" not in input_service.events
+
+
+def test_engine_resume_explicit_activation_switches_before_request(
+    tmp_path,
+) -> None:
+    events: list[str] = []
+    window_service = ActivatingWindowService(events)
+    window_service.foreground = True
+    recognizer = ScriptedRecognizer([SceneObservation()])
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+        window_service=window_service,
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.pause("用户暂停")
+    window_service.foreground = False
+    recognizer.observations.append(SceneObservation(ready=True))
+
+    engine.resume(activate=True)
+    try:
+        wait_until(lambda: input_service.events.count("F") == 2)
+
+        assert window_service.activate_calls == 1
+        activation_index = events.index("activate")
+        assert events[activation_index + 1] == "foreground"
+    finally:
+        engine.shutdown()
+
+
+def test_engine_resume_activation_failure_creates_no_resume_request(
+    tmp_path,
+) -> None:
+    window_service = ActivatingWindowService([])
+    window_service.foreground = True
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+    )
+    engine.start(1)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.pause("用户暂停")
+    events_before = list(input_service.events)
+    window_service.foreground = False
+    window_service.activate_succeeds = False
+
+    with pytest.raises(RuntimeError, match="自动切换到游戏失败"):
+        engine.resume(activate=True)
+
+    assert core.snapshot.state is FishingState.PAUSED
+    assert engine._resume_request is None
+    assert input_service.events == events_before
+    engine.shutdown()
+
+
 def test_engine_start_rejects_background_game_without_worker(tmp_path) -> None:
     window_service = RecordingWindowService()
     window_service.foreground = False

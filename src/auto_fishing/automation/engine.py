@@ -503,7 +503,7 @@ class AutomationEngine:
             output_index=getattr(bound, "output_index", None),
         )
 
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         with self._lifecycle_lock:
             if self._bound is None:
                 raise RuntimeError("请先绑定游戏窗口")
@@ -513,6 +513,8 @@ class AutomationEngine:
                 raise RuntimeError("自动化仍在关闭中")
             bound = self._bound
 
+        if activate:
+            self._activate_bound(bound)
         try:
             foreground = bool(self.window_service.is_foreground(bound))
         except Exception as error:
@@ -719,7 +721,7 @@ class AutomationEngine:
         )
         self._pause("E_USER_PAUSE", reason, frame)
 
-    def resume(self) -> None:
+    def resume(self, *, activate: bool = False) -> None:
         with self._pause_lock:
             requested_epoch = self._pause_epoch
             if self._closing or self._start_allowed is not True:
@@ -727,8 +729,10 @@ class AutomationEngine:
         snapshot = self.core.snapshot
         if snapshot.state is not FishingState.PAUSED:
             return
+        bound = self._require_bound()
+        if activate:
+            self._activate_bound(bound)
         try:
-            bound = self._require_bound()
             foreground = bool(self.window_service.is_foreground(bound))
         except Exception as error:
             detail = f"无法确认游戏窗口前台状态: {error}"
@@ -1321,6 +1325,31 @@ class AutomationEngine:
             self.runtime_log.event(name, **fields)
         except Exception as error:
             self.logger.warning("保存运行日志事件失败: %s", error)
+
+    def _activate_bound(self, bound: Any) -> None:
+        self._runtime_event(
+            "window.activation_requested",
+            hwnd=getattr(bound, "hwnd", None),
+        )
+        try:
+            activated = bool(self.window_service.activate(bound))
+            foreground = bool(self.window_service.is_foreground(bound))
+        except Exception as error:
+            self._runtime_event(
+                "window.activation_result",
+                success=False,
+                detail=str(error),
+            )
+            raise RuntimeError(
+                "自动切换到游戏失败，请关闭自动切回或手动切到游戏后重试"
+            ) from error
+
+        success = activated and foreground
+        self._runtime_event("window.activation_result", success=success)
+        if not success:
+            raise RuntimeError(
+                "自动切换到游戏失败，请关闭自动切回或手动切到游戏后重试"
+            )
 
     def _require_bound(self) -> Any:
         bound = self._bound

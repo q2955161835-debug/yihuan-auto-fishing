@@ -361,14 +361,14 @@ class AppController:
                 self._pending_resume_done = None
             raise
 
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         with self._command_condition:
             if self._closed:
                 return
             self._starting = True
             self._active_commands += 1
         try:
-            self.engine.start(target)
+            self.engine.start(target, activate=activate)
         finally:
             with self._command_condition:
                 self._starting = False
@@ -392,11 +392,11 @@ class AppController:
         finally:
             self._finish_command()
 
-    def resume(self) -> None:
+    def resume(self, *, activate: bool = False) -> None:
         if not self._begin_command():
             return
         try:
-            self.engine.resume()
+            self.engine.resume(activate=activate)
         finally:
             self._finish_command()
 

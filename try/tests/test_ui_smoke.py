@@ -29,8 +29,10 @@ class FakeController:
         self.calls.append("rebind")
         self.rebind_callbacks = (on_tick, on_done)
 
-    def start(self, target: int) -> None:
-        self.calls.append(("start", target))
+    def start(self, target: int, *, activate: bool = False) -> None:
+        self.calls.append(
+            ("start", target, True) if activate else ("start", target)
+        )
 
     def start_after_countdown(self, target, on_tick, on_done) -> None:
         self.calls.append(("start_after_countdown", target))
@@ -39,8 +41,8 @@ class FakeController:
     def pause(self, reason: str = "按钮暂停") -> None:
         self.calls.append("pause")
 
-    def resume(self) -> None:
-        self.calls.append("resume")
+    def resume(self, *, activate: bool = False) -> None:
+        self.calls.append(("resume", True) if activate else "resume")
 
     def resume_after_countdown(self, on_tick, on_done) -> None:
         self.calls.append("resume_after_countdown")
@@ -340,14 +342,16 @@ class BridgeEngine:
     def bind(self, bound) -> None:
         self.calls.append(("bind", bound))
 
-    def start(self, target: int) -> None:
-        self.calls.append(("start", target))
+    def start(self, target: int, *, activate: bool = False) -> None:
+        self.calls.append(
+            ("start", target, True) if activate else ("start", target)
+        )
 
     def pause(self, reason: str) -> None:
         self.calls.append(("pause", reason))
 
-    def resume(self) -> None:
-        self.calls.append("resume")
+    def resume(self, *, activate: bool = False) -> None:
+        self.calls.append(("resume", True) if activate else "resume")
 
     def cancel_current(self) -> None:
         self.calls.append("cancel_current")
@@ -359,9 +363,9 @@ class BridgeEngine:
 
 
 class RunningStartEngine(BridgeEngine):
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         self.running = True
-        super().start(target)
+        super().start(target, activate=activate)
 
 
 class BlockingPauseEngine(BridgeEngine):
@@ -416,11 +420,11 @@ class BlockingStartEngine(BridgeEngine):
         self.allow_start = threading.Event()
         self.pause_entered = threading.Event()
 
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         self.start_entered.set()
         if not self.allow_start.wait(1.0):
             raise RuntimeError("test did not release start")
-        super().start(target)
+        super().start(target, activate=activate)
 
     def pause(self, reason: str) -> None:
         self.pause_entered.set()
@@ -737,6 +741,16 @@ def test_controller_bridges_engine_commands_and_cancels_countdown_on_shutdown() 
         ("start", 4), ("pause", "按钮暂停"), "resume", "shutdown"
     ]
     assert completed == []
+
+
+def test_controller_forwards_explicit_game_activation() -> None:
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), ManualScheduler())
+
+    controller.start(2, activate=True)
+    controller.resume(activate=True)
+
+    assert engine.calls == [("start", 2, True), ("resume", True)]
 
 
 def test_controller_ignores_all_commands_after_shutdown() -> None:
