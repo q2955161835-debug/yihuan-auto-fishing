@@ -73,7 +73,6 @@ class AutomationCore:
         self.result_click_attempts = 0
         self.result_next_click_at: float | None = None
         self.result_waiting_logged = False
-        self.result_absent_frames = 0
         self.pause_code = ""
         self._error = ""
         self._fps = 0.0
@@ -322,24 +321,14 @@ class AutomationCore:
         client_rect: Rect | None,
     ) -> None:
         if observation.ready and self.state_machine.result_clicked:
+            self._record(
+                "result.dismiss_confirmed",
+                attempts=self.result_click_attempts,
+                signal="ready_hook",
+            )
             self.state_machine.handle(Event.READY_DETECTED, now)
             self._reset_result_dismissal()
             return
-
-        if self.state_machine.result_clicked:
-            if observation.result:
-                self.result_absent_frames = 0
-            else:
-                self.result_absent_frames += 1
-                if self.result_absent_frames >= 3:
-                    self._record(
-                        "result.dismiss_confirmed",
-                        attempts=self.result_click_attempts,
-                        absent_frames=self.result_absent_frames,
-                    )
-                    self.state_machine.handle(Event.READY_DETECTED, now)
-                    self._reset_result_dismissal()
-                    return
 
         if self.result_next_click_at is None:
             if observation.result:
@@ -431,7 +420,6 @@ class AutomationCore:
         self.result_click_attempts = 0
         self.result_next_click_at = None
         self.result_waiting_logged = False
-        self.result_absent_frames = 0
 
     def _record(self, name: str, **fields: object) -> None:
         if self.event_recorder is not None:

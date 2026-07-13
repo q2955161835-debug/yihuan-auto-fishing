@@ -8,6 +8,7 @@ from auto_fishing.vision.geometry import crop_normalized
 from auto_fishing.vision.progress import ProgressRecognizer
 from auto_fishing.vision.regions import (
     BITE_ROI,
+    READY_HOOK_ROI,
     READY_ROI,
     REEL_PROMPT_ROI,
     RESULT_CENTER_ROI,
@@ -80,6 +81,7 @@ class SceneRecognizer:
         bite_roi = crop_normalized(client_frame, BITE_ROI)
         reel_prompt_roi = crop_normalized(client_frame, REEL_PROMPT_ROI)
         ready_roi = crop_normalized(client_frame, READY_ROI)
+        ready_hook_roi = crop_normalized(client_frame, READY_HOOK_ROI)
         result_center = crop_normalized(client_frame, RESULT_CENTER_ROI)
         result_header = crop_normalized(client_frame, RESULT_HEADER_ROI)
         result_valid = _valid_mask(
@@ -100,7 +102,10 @@ class SceneRecognizer:
         bite = self.bite_detector.detect(bite_roi)
         result_center_candidate = (
             progress is None
-            and _blue_ratio(result_center, result_valid) > 0.40
+            and (
+                _blue_ratio(result_center, result_valid) > 0.40
+                or _cyan_green_ratio(result_center, result_valid) > 0.40
+            )
             and _white_ratio(result_center, result_valid) > 0.05
             and _dark_ratio(result_center, result_valid) < 0.60
         )
@@ -117,10 +122,20 @@ class SceneRecognizer:
             and _dark_ratio(reel_prompt_roi) > 0.60
             and _blue_ratio(reel_prompt_roi) < 0.01
         )
-        ready_candidate = (
+        legacy_ready_candidate = (
             progress is None
             and _white_ratio(ready_roi) > 0.01
             and _blue_ratio(ready_roi) < 0.03
+        )
+        ready_hook_white = _white_ratio(ready_hook_roi)
+        ready_hook_edges = _edge_ratio(ready_hook_roi)
+        real_hook_candidate = (
+            progress is None
+            and 0.012 <= ready_hook_white <= 0.030
+            and 0.070 <= ready_hook_edges <= 0.140
+        )
+        ready_candidate = (
+            (legacy_ready_candidate or real_hook_candidate)
             and not result_candidate
         )
 
@@ -175,6 +190,20 @@ def _magenta_ratio(
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, (135, 80, 80), (175, 255, 255)) > 0
     return _masked_mean(mask, valid)
+
+
+def _cyan_green_ratio(
+    image: np.ndarray,
+    valid: np.ndarray | None = None,
+) -> float:
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (35, 70, 60), (105, 255, 255)) > 0
+    return _masked_mean(mask, valid)
+
+
+def _edge_ratio(image: np.ndarray) -> float:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float((cv2.Canny(gray, 80, 160) > 0).mean())
 
 
 def _dark_ratio(
