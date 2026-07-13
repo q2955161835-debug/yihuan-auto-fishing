@@ -102,12 +102,8 @@ class SceneRecognizer:
         bite = self.bite_detector.detect(bite_roi)
         result_center_candidate = (
             progress is None
-            and (
-                _blue_ratio(result_center, result_valid) > 0.40
-                or _cyan_green_ratio(result_center, result_valid) > 0.40
-            )
+            and _colorful_ratio(result_center, result_valid) > 0.40
             and _white_ratio(result_center, result_valid) > 0.05
-            and _dark_ratio(result_center, result_valid) < 0.60
         )
         result_header_candidate = (
             _magenta_ratio(result_header, result_header_valid) > 0.08
@@ -192,12 +188,12 @@ def _magenta_ratio(
     return _masked_mean(mask, valid)
 
 
-def _cyan_green_ratio(
+def _colorful_ratio(
     image: np.ndarray,
     valid: np.ndarray | None = None,
 ) -> float:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (35, 70, 60), (105, 255, 255)) > 0
+    mask = cv2.inRange(hsv, (0, 70, 60), (179, 255, 255)) > 0
     return _masked_mean(mask, valid)
 
 

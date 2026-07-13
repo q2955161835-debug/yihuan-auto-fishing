@@ -20,7 +20,13 @@ def bite_prompt_frame() -> np.ndarray:
     return image
 
 
-def result_frame(width: int = 1280, height: int = 720, *, ready_icon: bool = False) -> np.ndarray:
+def result_frame(
+    width: int = 1280,
+    height: int = 720,
+    *,
+    ready_icon: bool = False,
+    center_color: tuple[int, int, int] = BLUE_BGR,
+) -> np.ndarray:
     image = np.full((height, width, 3), 25, dtype=np.uint8)
     cv2.rectangle(
         image,
@@ -55,7 +61,7 @@ def result_frame(width: int = 1280, height: int = 720, *, ready_icon: bool = Fal
         image,
         (round(width * 0.50), round(height * 0.50)),
         radius,
-        BLUE_BGR,
+        center_color,
         -1,
     )
     if ready_icon:
@@ -227,6 +233,31 @@ def test_result_requires_three_consecutive_frames() -> None:
     assert observation.result_candidate is True
     assert observation.result is True
     assert observation.progress is None
+
+
+@pytest.mark.parametrize(
+    "center_color",
+    [
+        (0, 0, 255),
+        (0, 165, 255),
+        (0, 255, 255),
+        (0, 255, 0),
+        (255, 255, 0),
+        (255, 0, 0),
+        (255, 0, 255),
+    ],
+)
+def test_result_center_accepts_any_saturated_hue(
+    center_color: tuple[int, int, int],
+) -> None:
+    recognizer = SceneRecognizer()
+    frame = result_frame(center_color=center_color)
+
+    recognizer.observe(frame, 1.0)
+    recognizer.observe(frame, 1.1)
+    observation = recognizer.observe(frame, 1.2)
+
+    assert observation.result is True
 
 
 def test_real_transition_vortex_never_confirms_result() -> None:
