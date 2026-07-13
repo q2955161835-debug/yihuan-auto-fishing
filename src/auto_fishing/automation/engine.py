@@ -31,7 +31,7 @@ from auto_fishing.vision.regions import TOP_ROI
 _RESULT_CLICK_DELAY_MIN = 3.10
 _RESULT_CLICK_DELAY_MAX = 3.60
 _STRUCTURED_PROGRESS_LOSS_LIMIT = 60
-_BLANK_PROGRESS_LOSS_LIMIT = 6
+_BLANK_PROGRESS_LOSS_LIMIT = 60
 
 
 class InputActionError(RuntimeError):
@@ -319,7 +319,7 @@ class AutomationCore:
             return
         if self.blank_missing_frames >= _BLANK_PROGRESS_LOSS_LIMIT:
             self.pause(
-                "连续六帧未识别进度条",
+                "连续六十帧未识别进度条",
                 now,
                 code="E_PROGRESS_LOST",
             )

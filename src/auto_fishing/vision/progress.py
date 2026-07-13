@@ -10,7 +10,8 @@ from auto_fishing.model import Direction, ProgressObservation
 
 
 _SCAN_FRACTIONS = (0.40, 0.43, 0.46, 0.49, 0.52)
-_SIDE_EXCLUSION = 0.08
+_SIDE_EXCLUSION = 0.16
+_MINIMUM_GREEN_WIDTH_RATIO = 0.012
 
 
 @dataclass(frozen=True)
@@ -114,17 +115,38 @@ class ProgressRecognizer:
                 rejection_reason="yellow_missing",
             )
 
-        candidates_by_line = [
-            _line_candidates(
-                _runs(green_mask[row] > 0, 0),
-                yellow_runs,
-                image_width,
-            )
+        reference = self._history[-1] if self._history else None
+        selected_yellow = _select_yellow_run(
+            yellow_runs,
+            image_width,
+            reference,
+        )
+        green_runs_by_line = [
+            _runs(green_mask[row] > 0, 0)
             for row in rows
+        ]
+        candidates_by_line = [
+            (
+                _line_candidates(
+                    green_runs,
+                    [selected_yellow],
+                    image_width,
+                )
+                + _independent_line_candidates(
+                    green_runs,
+                    selected_yellow,
+                    image_width,
+                )
+            )
+            for green_runs in green_runs_by_line
         ]
         valid_scanlines = sum(bool(candidates) for candidates in candidates_by_line)
         candidate_count = sum(len(candidates) for candidates in candidates_by_line)
-        consensus = _consensus(candidates_by_line, image_width)
+        consensus = _consensus(
+            candidates_by_line,
+            image_width,
+            reference=reference,
+        )
         if consensus is None:
             return ProgressScanResult(
                 observation=None,
@@ -201,8 +223,7 @@ def _line_candidates(
     candidates: list[_LineCandidate] = []
     for yellow_left, yellow_right in yellow_runs:
         yellow_center = (yellow_left + yellow_right) / 2
-        yellow_width = yellow_right - yellow_left
-        minimum_width = max(image_width * 0.02, yellow_width * 4)
+        minimum_width = _minimum_green_width(image_width)
         before = [
             run for run in green_runs if run[1] <= yellow_left + 3
         ]
@@ -226,7 +247,7 @@ def _line_candidates(
                 )
         for green_left, green_right in green_runs:
             green_width = green_right - green_left
-            margin = max(12.0, green_width * 0.05)
+            margin = max(3.0, green_width * 0.05)
             if (
                 green_left - margin
                 <= yellow_center
@@ -243,9 +264,49 @@ def _line_candidates(
     return candidates
 
 
+def _independent_line_candidates(
+    green_runs: list[tuple[int, int]],
+    yellow_run: tuple[int, int],
+    image_width: int,
+) -> list[_LineCandidate]:
+    yellow_left, yellow_right = yellow_run
+    yellow_center = (yellow_left + yellow_right) / 2
+    minimum_width = _minimum_green_width(image_width)
+    return [
+        _LineCandidate(
+            green_left=green_left,
+            green_right=green_right,
+            yellow_center=yellow_center,
+            minimum_width=minimum_width,
+        )
+        for green_left, green_right in green_runs
+    ]
+
+
+def _select_yellow_run(
+    yellow_runs: list[tuple[int, int]],
+    image_width: int,
+    reference: ProgressObservation | None,
+) -> tuple[int, int]:
+    target = (
+        reference.yellow_x * image_width
+        if reference is not None
+        else image_width / 2
+    )
+    return min(
+        yellow_runs,
+        key=lambda run: abs((run[0] + run[1]) / 2 - target),
+    )
+
+
+def _minimum_green_width(image_width: int) -> float:
+    return max(4.0, image_width * _MINIMUM_GREEN_WIDTH_RATIO)
+
+
 def _consensus(
     candidates_by_line: list[list[_LineCandidate]],
     image_width: int,
+    reference: ProgressObservation | None = None,
 ) -> tuple[_LineCandidate, int] | None:
     tolerance = image_width * 0.02
     groups: list[list[_LineCandidate]] = []
@@ -277,13 +338,36 @@ def _consensus(
                 groups.append(matches)
     if not groups:
         return None
-    selected = max(
-        groups,
-        key=lambda group: (
-            len(group),
-            np.median([item.green_right - item.green_left for item in group]),
-        ),
-    )
+
+    valid_groups = [
+        group
+        for group in groups
+        if np.median(
+            [item.green_right - item.green_left for item in group]
+        )
+        >= np.median([item.minimum_width for item in group])
+    ]
+    selection_pool = valid_groups or groups
+
+    def group_rank(group: list[_LineCandidate]) -> tuple[float, ...]:
+        median_left = float(np.median([item.green_left for item in group]))
+        median_right = float(np.median([item.green_right for item in group]))
+        median_width = median_right - median_left
+        if reference is None:
+            return (median_width, len(group))
+        reference_center = (
+            reference.green_left + reference.green_right
+        ) * image_width / 2
+        reference_width = (
+            reference.green_right - reference.green_left
+        ) * image_width
+        tracking_distance = (
+            abs((median_left + median_right) / 2 - reference_center)
+            + abs(median_width - reference_width) * 0.25
+        )
+        return (-tracking_distance, len(group), median_width)
+
+    selected = max(selection_pool, key=group_rank)
     return (
         _LineCandidate(
             green_left=round(np.median([item.green_left for item in selected])),

@@ -119,6 +119,54 @@ def test_marker_sweep_never_loses_bar_when_marker_splits_green() -> None:
         assert abs(observation.green_right - 171 / 300) < 0.02
 
 
+def test_tracks_short_green_bar_when_marker_moves_far_outside() -> None:
+    recognizer = ProgressRecognizer()
+
+    initial = recognizer.detect(
+        frame(green=(96, 136), yellow=116),
+        0.0,
+    )
+    observation = recognizer.detect(
+        frame(green=(100, 118), yellow=180),
+        1 / 30,
+    )
+
+    assert initial is not None
+    assert observation is not None
+    assert abs(observation.green_left - 100 / 300) < 0.02
+    assert abs(observation.green_right - 119 / 300) < 0.02
+    assert abs(observation.yellow_x - 180 / 300) < 0.02
+
+
+def test_detects_short_bar_and_marker_independently_across_top_playfield() -> None:
+    image = frame(green=(100, 118), yellow=180)
+    cv2.rectangle(image, (29, 34), (35, 76), YELLOW_BGR, -1)
+
+    observation = ProgressRecognizer().detect(image, 0.0)
+
+    assert observation is not None
+    assert abs(observation.green_left - 100 / 300) < 0.02
+    assert abs(observation.green_right - 119 / 300) < 0.02
+    assert abs(observation.yellow_x - 180 / 300) < 0.02
+
+
+def test_recovery_prefers_valid_short_bar_over_nearby_tiny_noise() -> None:
+    recognizer = ProgressRecognizer()
+    assert recognizer.detect(
+        frame(green=(96, 136), yellow=116),
+        0.0,
+    ) is not None
+    image = frame(green=(150, 168), yellow=210)
+    cv2.rectangle(image, (100, 40), (102, 70), GREEN_BGR, -1)
+
+    result = recognizer.analyze(image, 1 / 30)
+
+    assert result.observation is not None
+    assert abs(result.observation.green_left - 150 / 300) < 0.02
+    assert abs(result.observation.green_right - 169 / 300) < 0.02
+    assert abs(result.observation.yellow_x - 210 / 300) < 0.02
+
+
 def test_controller_moves_toward_inner_safe_band() -> None:
     recognizer = ProgressRecognizer()
     controller = ProgressController(center_tolerance_ratio=0.10)
@@ -165,7 +213,7 @@ def test_ignores_multiple_larger_noise_candidates_without_spatial_pair() -> None
 
 
 def test_rejects_green_region_that_is_too_narrow() -> None:
-    result = ProgressRecognizer().analyze(frame(green=(100, 125), yellow=112), 1.0)
+    result = ProgressRecognizer().analyze(frame(green=(100, 102), yellow=112), 1.0)
 
     assert result.observation is None
     assert result.rejection_reason == "bar_too_narrow"

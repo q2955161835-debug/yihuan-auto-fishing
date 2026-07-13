@@ -962,16 +962,31 @@ def test_result_click_pauses_when_all_safe_points_are_occluded() -> None:
     assert not any(isinstance(event, tuple) for event in input_service.events)
 
 
-def test_core_releases_on_first_missing_bar_and_pauses_at_six_frames() -> None:
+def test_core_releases_on_first_missing_bar_and_pauses_at_sixty_frames() -> None:
     core, input_service, _state_machine = make_core(state=FishingState.CONTROL)
 
-    for index in range(6):
+    for index in range(60):
         core.process(SceneObservation(), None, 0.04 + index / 30, None)
 
     assert input_service.events[0] == "release"
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_PROGRESS_LOST"
-    assert "连续六帧" in core.snapshot.error
+    assert "连续六十帧" in core.snapshot.error
+
+
+def test_fifty_nine_blank_frames_then_recovery_stays_control() -> None:
+    core, input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    progress = ProgressObservation(0.3, 0.4, 0.7, 1.0, 2.0)
+
+    for index in range(59):
+        core.process(SceneObservation(), None, index / 30, CLIENT)
+    core.process(SceneObservation(progress=progress), None, 2.0, CLIENT)
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert core.blank_missing_frames == 0
+    assert input_service.events[-1] == "left"
 
 
 def clean_progress_disappearance() -> SceneObservation:
@@ -1034,7 +1049,7 @@ def test_two_clean_missing_frames_then_recovery_stays_control() -> None:
     assert core.snapshot.state is FishingState.CONTROL
 
 
-def test_early_blank_loss_still_pauses() -> None:
+def test_early_blank_loss_still_pauses_after_sixty_frames() -> None:
     core, _input_service, _state_machine = make_core(
         state=FishingState.CONTROL
     )
@@ -1046,7 +1061,7 @@ def test_early_blank_loss_still_pauses() -> None:
             0.1 + index / 30,
             CLIENT,
         )
-    for index in range(6):
+    for index in range(60):
         core.process(
             clean_progress_disappearance(),
             None,
@@ -1141,17 +1156,17 @@ def test_control_keeps_tracking_when_reel_prompt_overlaps_progress_bar() -> None
     assert input_service.events == ["left"]
 
 
-def test_result_candidate_cannot_override_sixth_frame_progress_loss() -> None:
+def test_result_candidate_cannot_override_sixtieth_frame_progress_loss() -> None:
     core, _input_service, _state_machine = make_core(
         state=FishingState.CONTROL
     )
-    for index in range(5):
+    for index in range(59):
         core.process(SceneObservation(), None, index / 30, CLIENT)
 
     core.process(
         SceneObservation(result_candidate=True),
         None,
-        5 / 30,
+        59 / 30,
         CLIENT,
     )
     assert core.snapshot.state is FishingState.PAUSED
@@ -1625,7 +1640,7 @@ def test_progress_loss_saves_only_the_newest_twelve_progress_strips(
 
     engine._pause(
         "E_PROGRESS_LOST",
-        "连续六帧未识别进度条",
+        "连续六十帧未识别进度条",
         np.zeros((120, 300, 3), dtype=np.uint8),
     )
 
