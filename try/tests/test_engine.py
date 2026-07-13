@@ -609,7 +609,7 @@ class LateReleaseCoreProxy:
 
 def single_round_observations(
     *,
-    result_frames: int = 3,
+    result_frames: int = 4,
 ) -> list[SceneObservation]:
     progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
     return [
@@ -817,16 +817,16 @@ def test_result_click_uses_measured_random_delay_without_visual_confirmation() -
     )
     enter_wait_result(core, state_machine, now=1.0)
 
-    core.process(SceneObservation(result=True), None, 3.099, CLIENT)
+    core.process(SceneObservation(result=True), None, 4.099, CLIENT)
     assert not any(
         isinstance(event, tuple) and event[0] == "click"
         for event in input_service.events
     )
 
-    core.process(SceneObservation(), None, 3.10, CLIENT)
+    core.process(SceneObservation(), None, 4.10, CLIENT)
 
     assert ("click", 1024, 396) in input_service.events
-    assert samples == [(2.10, 2.60)]
+    assert samples == [(3.10, 3.60)]
     assert {
         "event": "result.dismiss_attempt",
         "attempt": 1,
@@ -864,7 +864,7 @@ def test_failed_result_click_does_not_count_round_as_completed() -> None:
     input_service.failure = InputFailure("result click failed")
 
     with pytest.raises(InputActionError, match="result click failed"):
-        core.process(SceneObservation(), None, 3.10, CLIENT)
+        core.process(SceneObservation(), None, 4.10, CLIENT)
 
     assert core.snapshot.state is FishingState.WAIT_RESULT
     assert core.snapshot.completed == 0
@@ -881,7 +881,7 @@ def test_timed_result_click_counts_only_once_without_followup_observation() -> N
         event_recorder=runtime_log,
     )
     enter_wait_result(core, state_machine, now=1.0)
-    core.process(SceneObservation(), None, 3.10, CLIENT)
+    core.process(SceneObservation(), None, 4.10, CLIENT)
 
     assert core.snapshot.state is FishingState.COMPLETE
     assert core.snapshot.completed == 1
@@ -911,12 +911,12 @@ def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> No
     assert core.resume(SceneObservation(), 2.0) is True
     assert core.snapshot.state is FishingState.WAIT_RESULT
 
-    core.process(SceneObservation(), None, 4.099, CLIENT)
+    core.process(SceneObservation(), None, 5.099, CLIENT)
     assert not any(isinstance(event, tuple) for event in input_service.events)
-    core.process(SceneObservation(), None, 4.10, CLIENT)
+    core.process(SceneObservation(), None, 5.10, CLIENT)
 
     assert core.snapshot.state is FishingState.COMPLETE
-    assert samples == [(2.10, 2.60), (2.10, 2.60)]
+    assert samples == [(3.10, 3.60), (3.10, 3.60)]
 
 
 def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:
@@ -926,7 +926,7 @@ def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:
     input_service.occlusion = Rect(1000, 350, 1060, 430)
     enter_wait_result(core, state_machine, now=1.0)
 
-    core.process(SceneObservation(), None, 3.10, CLIENT)
+    core.process(SceneObservation(), None, 4.10, CLIENT)
 
     assert ("click", 1088, 324) in input_service.events
 
@@ -938,7 +938,7 @@ def test_result_click_pauses_when_all_safe_points_are_occluded() -> None:
     input_service.occlusion = CLIENT
     enter_wait_result(core, state_machine, now=1.0)
 
-    core.process(SceneObservation(), None, 3.10, CLIENT)
+    core.process(SceneObservation(), None, 4.10, CLIENT)
 
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_OSK"
@@ -1096,7 +1096,7 @@ def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
         try:
             wait_until(
                 lambda: core.snapshot.state is FishingState.COMPLETE,
-                timeout=4.0,
+                timeout=5.0,
             )
         except AssertionError as error:
             raise AssertionError(
@@ -1104,7 +1104,7 @@ def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
                 f"remaining={len(recognizer.observations)}, "
                 f"next_click={core.result_next_click_at!r}"
             ) from error
-        wait_until(lambda: engine.is_running is False, timeout=4.0)
+        wait_until(lambda: engine.is_running is False, timeout=5.0)
         completed_event_count = len(input_service.events)
         time.sleep(0.02)
 
@@ -1149,7 +1149,7 @@ def test_complete_publish_racing_shutdown_preserves_terminal_state(
 
     engine.subscribe(subscriber)
     engine.start(1)
-    assert complete_publish_entered.wait(timeout=4.0)
+    assert complete_publish_entered.wait(timeout=5.0)
     releases_before_shutdown = input_service.events.count("release")
     shutdown_thread = threading.Thread(target=engine.shutdown)
     shutdown_thread.start()
@@ -1182,7 +1182,7 @@ def test_pause_and_f8_after_worker_exit_preserve_complete(tmp_path) -> None:
 
     engine.start(1)
     try:
-        wait_until(lambda: engine.is_running is False, timeout=4.0)
+        wait_until(lambda: engine.is_running is False, timeout=5.0)
         releases_before_pause = input_service.events.count("release")
 
         engine.pause("按钮暂停")

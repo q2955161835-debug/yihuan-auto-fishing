@@ -28,8 +28,8 @@ from auto_fishing.vision.geometry import crop_normalized
 from auto_fishing.vision.regions import TOP_ROI
 
 
-_RESULT_CLICK_DELAY_MIN = 2.10
-_RESULT_CLICK_DELAY_MAX = 2.60
+_RESULT_CLICK_DELAY_MIN = 3.10
+_RESULT_CLICK_DELAY_MAX = 3.60
 
 
 class InputActionError(RuntimeError):
