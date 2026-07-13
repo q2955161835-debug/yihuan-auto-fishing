@@ -12,6 +12,9 @@ from auto_fishing.model import Direction, ProgressObservation
 _SCAN_FRACTIONS = (0.40, 0.43, 0.46, 0.49, 0.52)
 _SIDE_EXCLUSION = 0.16
 _MINIMUM_GREEN_WIDTH_RATIO = 0.012
+_CONTROL_HISTORY_LIMIT = 15
+_CONTROL_RECENCY_DECAY = 0.20
+_CONTROL_MAX_FRAME_GAP_SECONDS = 0.20
 
 
 @dataclass(frozen=True)
@@ -188,19 +191,59 @@ class ProgressController:
         if not 0 < center_tolerance_ratio < 0.5:
             raise ValueError("center_tolerance_ratio 必须在 0 与 0.5 之间")
         self.center_tolerance_ratio = center_tolerance_ratio
+        self._samples: deque[tuple[float, float, float]] = deque(
+            maxlen=_CONTROL_HISTORY_LIMIT,
+        )
+        self._weighted_error = 0.0
+
+    @property
+    def sample_count(self) -> int:
+        return len(self._samples)
+
+    @property
+    def weighted_error(self) -> float:
+        return self._weighted_error
 
     def decide(self, observation: ProgressObservation | None) -> Direction:
         if observation is None:
+            self._clear_samples()
             return Direction.RELEASE
 
         green_width = observation.green_right - observation.green_left
+        if green_width <= 0:
+            self._clear_samples()
+            return Direction.RELEASE
+        if self._samples:
+            previous_timestamp = self._samples[-1][2]
+            frame_gap = observation.timestamp - previous_timestamp
+            if frame_gap <= 0 or frame_gap > _CONTROL_MAX_FRAME_GAP_SECONDS:
+                self._clear_samples()
         green_center = (observation.green_left + observation.green_right) / 2
-        tolerance = green_width * self.center_tolerance_ratio
-        if observation.yellow_x < green_center - tolerance:
+        relative_error = (observation.yellow_x - green_center) / green_width
+        confidence = min(1.0, max(0.05, observation.confidence))
+        self._samples.append(
+            (relative_error, confidence, observation.timestamp),
+        )
+
+        weighted_total = 0.0
+        weight_total = 0.0
+        for age, (error, clarity, _timestamp) in enumerate(
+            reversed(self._samples),
+        ):
+            weight = clarity * (_CONTROL_RECENCY_DECAY**age)
+            weighted_total += error * weight
+            weight_total += weight
+        self._weighted_error = weighted_total / weight_total
+
+        if self._weighted_error < -self.center_tolerance_ratio:
             return Direction.RIGHT
-        if observation.yellow_x > green_center + tolerance:
+        if self._weighted_error > self.center_tolerance_ratio:
             return Direction.LEFT
         return Direction.RELEASE
+
+    def _clear_samples(self) -> None:
+        self._samples.clear()
+        self._weighted_error = 0.0
 
 
 def _runs(mask_row: np.ndarray, offset: int) -> list[tuple[int, int]]:

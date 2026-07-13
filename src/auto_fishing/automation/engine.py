@@ -280,9 +280,17 @@ class AutomationCore:
             self._reset_progress_tracking()
             self.bar_valid_frames += 1
             direction = self.controller.decide(observation.progress)
+            self._record(
+                "progress.control",
+                direction=direction.value,
+                sample_count=self.controller.sample_count,
+                weighted_error=self.controller.weighted_error,
+                confidence=observation.progress.confidence,
+            )
             self._input(lambda: self.input_service.set_direction(direction))
             return
 
+        self.controller.decide(None)
         self._input(self.input_service.release_all)
         has_structure = (
             observation.progress_scanlines > 0

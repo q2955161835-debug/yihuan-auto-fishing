@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from auto_fishing.model import Direction
+from auto_fishing.model import Direction, ProgressObservation
 from auto_fishing.vision.progress import ProgressController, ProgressRecognizer
 
 
@@ -189,6 +189,83 @@ def test_controller_uses_a_narrow_deadband_around_green_center() -> None:
     assert controller.decide(recognizer.detect(frame(yellow=100), 1.0)) == Direction.RIGHT
     assert controller.decide(recognizer.detect(frame(yellow=120), 1.1)) == Direction.RELEASE
     assert controller.decide(recognizer.detect(frame(yellow=140), 1.2)) == Direction.LEFT
+
+
+def control_observation(
+    yellow_x: float,
+    *,
+    confidence: float = 1.0,
+    timestamp: float = 0.0,
+) -> ProgressObservation:
+    return ProgressObservation(
+        green_left=0.4,
+        green_right=0.6,
+        yellow_x=yellow_x,
+        confidence=confidence,
+        timestamp=timestamp,
+    )
+
+
+def test_controller_keeps_at_most_fifteen_recent_observations() -> None:
+    controller = ProgressController()
+
+    for index in range(20):
+        controller.decide(
+            control_observation(0.7, timestamp=index / 30),
+        )
+
+    assert controller.sample_count == 15
+
+
+def test_controller_prioritizes_newest_equally_clear_frame() -> None:
+    controller = ProgressController()
+    for index in range(14):
+        controller.decide(
+            control_observation(0.7, timestamp=index / 30),
+        )
+
+    direction = controller.decide(
+        control_observation(0.3, timestamp=14 / 30),
+    )
+
+    assert direction is Direction.RIGHT
+    assert controller.weighted_error < -controller.center_tolerance_ratio
+
+
+def test_controller_uses_clear_previous_frame_when_latest_is_unclear() -> None:
+    controller = ProgressController()
+    controller.decide(control_observation(0.7, confidence=1.0))
+
+    direction = controller.decide(
+        control_observation(0.3, confidence=0.1, timestamp=1 / 30),
+    )
+
+    assert direction is Direction.LEFT
+    assert controller.weighted_error > controller.center_tolerance_ratio
+
+
+def test_controller_missing_frame_clears_recent_observations() -> None:
+    controller = ProgressController()
+    controller.decide(control_observation(0.7))
+    controller.decide(control_observation(0.7, timestamp=1 / 30))
+
+    direction = controller.decide(None)
+
+    assert direction is Direction.RELEASE
+    assert controller.sample_count == 0
+    assert controller.weighted_error == 0.0
+
+
+def test_controller_discards_observations_after_long_frame_gap() -> None:
+    controller = ProgressController()
+    controller.decide(control_observation(0.7, timestamp=0.0))
+
+    direction = controller.decide(
+        control_observation(0.3, timestamp=0.21),
+    )
+
+    assert direction is Direction.RIGHT
+    assert controller.sample_count == 1
 
 
 def test_no_color_candidates_returns_none_and_releases() -> None:

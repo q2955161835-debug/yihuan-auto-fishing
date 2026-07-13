@@ -1156,6 +1156,53 @@ def test_control_keeps_tracking_when_reel_prompt_overlaps_progress_bar() -> None
     assert input_service.events == ["left"]
 
 
+def test_control_records_weighted_recent_frame_decision() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, _state_machine = make_core(
+        state=FishingState.CONTROL,
+        event_recorder=runtime_log,
+    )
+    progress = ProgressObservation(0.3, 0.7, 0.7, 0.8, 0.1)
+
+    core.process(
+        SceneObservation(progress=progress),
+        None,
+        0.1,
+        CLIENT,
+    )
+
+    event = next(
+        item
+        for item in runtime_log.events
+        if item["event"] == "progress.control"
+    )
+    assert event["direction"] == "left"
+    assert event["sample_count"] == 1
+    assert event["weighted_error"] == pytest.approx(0.5)
+    assert event["confidence"] == 0.8
+    assert input_service.events == ["left"]
+
+
+def test_missing_progress_clears_weighted_control_window() -> None:
+    core, input_service, _state_machine = make_core(
+        state=FishingState.CONTROL
+    )
+    progress = ProgressObservation(0.3, 0.7, 0.7, 1.0, 0.1)
+    core.process(SceneObservation(progress=progress), None, 0.1, CLIENT)
+    assert core.controller.sample_count == 1
+
+    core.process(
+        structured_progress_ambiguity(),
+        None,
+        0.2,
+        CLIENT,
+    )
+
+    assert core.controller.sample_count == 0
+    assert core.controller.weighted_error == 0.0
+    assert input_service.events[-1] == "release"
+
+
 def test_result_candidate_cannot_override_sixtieth_frame_progress_loss() -> None:
     core, _input_service, _state_machine = make_core(
         state=FishingState.CONTROL
