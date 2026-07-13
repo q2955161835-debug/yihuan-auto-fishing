@@ -18,6 +18,7 @@ class _LineCandidate:
     green_left: int
     green_right: int
     yellow_center: float
+    minimum_width: float
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,7 @@ class ProgressRecognizer:
             )
         candidate, agreeing_scanlines = consensus
         green_width = candidate.green_right - candidate.green_left
-        if green_width < image_width * 0.12:
+        if green_width < candidate.minimum_width:
             return ProgressScanResult(
                 observation=None,
                 valid_scanlines=valid_scanlines,
@@ -144,7 +145,7 @@ class ProgressRecognizer:
         agreement = agreeing_scanlines / len(_SCAN_FRACTIONS)
         width_score = min(
             1.0,
-            green_width / (image_width * 0.12),
+            green_width / candidate.minimum_width,
         )
         width = float(image_width)
         return ProgressScanResult(
@@ -198,9 +199,10 @@ def _line_candidates(
     image_width: int,
 ) -> list[_LineCandidate]:
     candidates: list[_LineCandidate] = []
-    minimum_width = image_width * 0.12
     for yellow_left, yellow_right in yellow_runs:
         yellow_center = (yellow_left + yellow_right) / 2
+        yellow_width = yellow_right - yellow_left
+        minimum_width = max(image_width * 0.02, yellow_width * 4)
         before = [
             run for run in green_runs if run[1] <= yellow_left + 3
         ]
@@ -213,29 +215,29 @@ def _line_candidates(
             if (
                 yellow_left - left_run[1] <= 3
                 and right_run[0] - yellow_right <= 3
-                and right_run[1] - left_run[0] >= minimum_width
             ):
                 candidates.append(
                     _LineCandidate(
                         left_run[0],
                         right_run[1],
                         yellow_center,
+                        minimum_width,
                     )
                 )
         for green_left, green_right in green_runs:
             green_width = green_right - green_left
             margin = max(12.0, green_width * 0.05)
             if (
-                green_width >= minimum_width
-                and green_left - margin
+                green_left - margin
                 <= yellow_center
                 <= green_right + margin
             ):
                 candidates.append(
                     _LineCandidate(
-                        green_left,
-                        green_right,
+                        min(green_left, yellow_left),
+                        max(green_right, yellow_right),
                         yellow_center,
+                        minimum_width,
                     )
                 )
     return candidates
@@ -288,6 +290,9 @@ def _consensus(
             green_right=round(np.median([item.green_right for item in selected])),
             yellow_center=float(
                 np.median([item.yellow_center for item in selected])
+            ),
+            minimum_width=float(
+                np.median([item.minimum_width for item in selected])
             ),
         ),
         len(selected),

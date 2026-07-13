@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from auto_fishing.model import Direction
 from auto_fishing.vision.progress import ProgressController, ProgressRecognizer
@@ -36,6 +37,20 @@ def frame(
     return image
 
 
+def narrow_frame(image_width: int, marker_fraction: float) -> np.ndarray:
+    image = np.zeros((120, image_width, 3), dtype=np.uint8)
+    green_width = round(image_width * 0.09)
+    green_left = round(image_width * 0.35)
+    green_right = green_left + green_width - 1
+    yellow_width = max(3, round(image_width * 0.01))
+    yellow_center = green_left + round(green_width * marker_fraction)
+    yellow_left = yellow_center - yellow_width // 2
+    yellow_right = yellow_left + yellow_width - 1
+    cv2.rectangle(image, (green_left, 40), (green_right, 70), GREEN_BGR, -1)
+    cv2.rectangle(image, (yellow_left, 34), (yellow_right, 76), YELLOW_BGR, -1)
+    return image
+
+
 def test_detects_green_interval_and_yellow_marker() -> None:
     obs = ProgressRecognizer().detect(frame(), 1.0)
 
@@ -58,6 +73,36 @@ def test_real_split_marker_fixture_reconstructs_full_green_interval() -> None:
     assert observation is not None
     assert observation.green_left < observation.yellow_x < observation.green_right
     assert observation.green_right - observation.green_left > 0.12
+
+
+def test_real_high_quality_fixture_detects_narrow_green_interval() -> None:
+    fixture = Path("try/fixtures/progress/progress_narrow_high_quality.png")
+    image = cv2.imdecode(
+        np.fromfile(fixture, dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+
+    observation = ProgressRecognizer().detect(image, 1.0)
+
+    assert observation is not None
+    assert observation.green_left < observation.yellow_x < observation.green_right
+    assert 0.08 <= observation.green_right - observation.green_left <= 0.11
+
+
+@pytest.mark.parametrize("image_width", [300, 600, 1200])
+@pytest.mark.parametrize("marker_fraction", [0.08, 0.50, 0.92])
+def test_narrow_split_bar_is_detected_at_multiple_scales_and_marker_positions(
+    image_width: int,
+    marker_fraction: float,
+) -> None:
+    observation = ProgressRecognizer().detect(
+        narrow_frame(image_width, marker_fraction),
+        1.0,
+    )
+
+    assert observation is not None
+    assert observation.green_left < observation.yellow_x < observation.green_right
+    assert 0.08 <= observation.green_right - observation.green_left <= 0.10
 
 
 def test_marker_sweep_never_loses_bar_when_marker_splits_green() -> None:
@@ -120,7 +165,10 @@ def test_ignores_multiple_larger_noise_candidates_without_spatial_pair() -> None
 
 
 def test_rejects_green_region_that_is_too_narrow() -> None:
-    assert ProgressRecognizer().detect(frame(green=(100, 125), yellow=112), 1.0) is None
+    result = ProgressRecognizer().analyze(frame(green=(100, 125), yellow=112), 1.0)
+
+    assert result.observation is None
+    assert result.rejection_reason == "bar_too_narrow"
 
 
 def test_rejects_yellow_marker_outside_progress_bar_vertical_span() -> None:
