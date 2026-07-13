@@ -34,11 +34,16 @@ class BiteDetector:
             return False
 
         self.frames_since_baseline += 1
+        blue, white, edges = self._signature(roi)
         if self.frames_since_baseline <= 45:
+            self.baseline = (
+                min(self.baseline[0], blue),
+                self.baseline[1],
+                self.baseline[2],
+            )
             self.consecutive = 0
             return False
 
-        blue, white, edges = self._signature(roi)
         blue_changed = blue - self.baseline[0] > 0.03
         shape_changed = (
             white - self.baseline[1] > 0.03

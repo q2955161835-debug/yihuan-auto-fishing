@@ -194,6 +194,21 @@ def test_cast_animation_does_not_trigger_bite_during_cooldown() -> None:
         assert detector.detect(bite_prompt_frame()) is False
 
 
+def test_bite_recovers_when_ready_icon_contaminates_initial_blue_baseline(
+) -> None:
+    ready_icon = np.zeros((100, 100, 3), dtype=np.uint8)
+    cv2.circle(ready_icon, (50, 50), 35, BLUE_BGR, -1)
+    post_cast_background = np.zeros((100, 100, 3), dtype=np.uint8)
+    detector = BiteDetector()
+    detector.set_baseline(ready_icon)
+
+    for _ in range(45):
+        assert detector.detect(post_cast_background) is False
+
+    assert detector.detect(bite_prompt_frame()) is False
+    assert detector.detect(bite_prompt_frame()) is True
+
+
 @pytest.mark.parametrize("size", [(1280, 720), (1920, 1080), (1600, 1000)])
 def test_scene_right_bottom_bite_prompt_scales_with_client_resolution(
     size: tuple[int, int],
