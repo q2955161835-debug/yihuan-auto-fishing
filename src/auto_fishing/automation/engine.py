@@ -72,7 +72,6 @@ class AutomationCore:
         self.result_candidate_frames = 0
         self.result_click_attempts = 0
         self.result_next_click_at: float | None = None
-        self.result_waiting_logged = False
         self.pause_code = ""
         self._error = ""
         self._fps = 0.0
@@ -320,16 +319,6 @@ class AutomationCore:
         now: float,
         client_rect: Rect | None,
     ) -> None:
-        if observation.ready and self.state_machine.result_clicked:
-            self._record(
-                "result.dismiss_confirmed",
-                attempts=self.result_click_attempts,
-                signal="ready_hook",
-            )
-            self.state_machine.handle(Event.READY_DETECTED, now)
-            self._reset_result_dismissal()
-            return
-
         if self.result_next_click_at is None:
             if observation.result:
                 self._schedule_result_click(now, 0.18, 0.42)
@@ -337,23 +326,6 @@ class AutomationCore:
         if now < self.result_next_click_at:
             return
         if not observation.result:
-            if self.state_machine.result_clicked and not self.result_waiting_logged:
-                self._record(
-                    "result.dismiss_waiting",
-                    attempts=self.result_click_attempts,
-                )
-                self.result_waiting_logged = True
-            return
-        if self.result_click_attempts >= 3:
-            self._record(
-                "result.dismiss_failed",
-                attempts=self.result_click_attempts,
-            )
-            self.pause(
-                "真实鱼获卡片连续三次点击后仍未关闭",
-                now,
-                code="E_RESULT_DISMISS",
-            )
             return
         if client_rect is None:
             return
@@ -377,10 +349,13 @@ class AutomationCore:
         )
         self._input(lambda: self.input_service.click(x, y))
         self.result_click_attempts = attempt
-        self.result_waiting_logged = False
-        if attempt == 1:
-            self.state_machine.handle(Event.RESULT_CLICKED, now)
-        self._schedule_result_click(now, 0.40, 0.80)
+        self._record(
+            "result.dismiss_confirmed",
+            attempts=attempt,
+            signal="click_succeeded",
+        )
+        self.state_machine.handle(Event.RESULT_CLICKED, now)
+        self._reset_result_dismissal()
 
     def _schedule_result_click(
         self,
@@ -419,7 +394,6 @@ class AutomationCore:
     def _reset_result_dismissal(self) -> None:
         self.result_click_attempts = 0
         self.result_next_click_at = None
-        self.result_waiting_logged = False
 
     def _record(self, name: str, **fields: object) -> None:
         if self.event_recorder is not None:

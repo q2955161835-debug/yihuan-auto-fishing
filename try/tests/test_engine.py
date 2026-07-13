@@ -790,7 +790,7 @@ def test_engine_pauses_with_e_logging_and_releases_inputs_when_runtime_log_fails
         engine.shutdown()
 
 
-def test_core_drives_single_round_and_counts_only_after_ready() -> None:
+def test_core_counts_round_immediately_after_result_click_succeeds() -> None:
     core, input_service, _state_machine = make_core()
     progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
     sequence = [
@@ -806,10 +806,6 @@ def test_core_drives_single_round_and_counts_only_after_ready() -> None:
     core.start(1, 0.0)
     for index, observation in enumerate(sequence, 1):
         core.process(observation, None, float(index), CLIENT)
-
-    assert core.snapshot.state is FishingState.DISMISS_RESULT
-    assert core.snapshot.completed == 0
-    core.process(SceneObservation(ready=True), None, 9.0, CLIENT)
 
     assert core.snapshot.state is FishingState.COMPLETE
     assert core.snapshot.completed == 1
@@ -840,7 +836,7 @@ def test_result_click_waits_for_random_schedule_and_logs_safe_point() -> None:
     core.process(SceneObservation(result=True), None, 1.18, CLIENT)
 
     assert ("click", 1024, 396) in input_service.events
-    assert samples[:2] == [(0.18, 0.42), (0.40, 0.80)]
+    assert samples == [(0.18, 0.42)]
     assert {
         "event": "result.dismiss_attempt",
         "attempt": 1,
@@ -848,9 +844,16 @@ def test_result_click_waits_for_random_schedule_and_logs_safe_point() -> None:
         "y": 396,
         "result": True,
     } in runtime_log.events
+    assert {
+        "event": "result.dismiss_confirmed",
+        "attempts": 1,
+        "signal": "click_succeeded",
+    } in runtime_log.events
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
 
 
-def test_result_click_retries_three_times_then_pauses_if_card_remains() -> None:
+def test_result_click_does_not_retry_or_wait_when_card_remains() -> None:
     runtime_log = RecordingRuntimeLog()
     core, input_service, state_machine = make_core(
         random_uniform=lambda low, _high: low,
@@ -863,21 +866,36 @@ def test_result_click_retries_three_times_then_pauses_if_card_remains() -> None:
     core.process(SceneObservation(result=True), None, 2.38, CLIENT)
 
     clicks = [event for event in input_service.events if isinstance(event, tuple)]
-    assert clicks == [
-        ("click", 1024, 396),
-        ("click", 1024, 396),
-        ("click", 1024, 396),
-    ]
-    assert core.snapshot.state is FishingState.PAUSED
-    assert core.pause_code == "E_RESULT_DISMISS"
-    assert any(
+    assert clicks == [("click", 1024, 396)]
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
+    assert not any(
         event["event"] == "result.dismiss_failed"
-        and event["attempts"] == 3
         for event in runtime_log.events
     )
 
 
-def test_result_disappearance_prevents_retry_and_ready_counts_once() -> None:
+def test_failed_result_click_does_not_count_round_as_completed() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, state_machine = make_core(
+        random_uniform=lambda low, _high: low,
+        event_recorder=runtime_log,
+    )
+    enter_dismiss_result(core, state_machine)
+    input_service.failure = InputFailure("result click failed")
+
+    with pytest.raises(InputActionError, match="result click failed"):
+        core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+
+    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    assert core.snapshot.completed == 0
+    assert not any(
+        event["event"] == "result.dismiss_confirmed"
+        for event in runtime_log.events
+    )
+
+
+def test_result_click_counts_once_without_waiting_for_followup_ready() -> None:
     runtime_log = RecordingRuntimeLog()
     core, input_service, state_machine = make_core(
         random_uniform=lambda low, _high: low,
@@ -886,6 +904,8 @@ def test_result_disappearance_prevents_retry_and_ready_counts_once() -> None:
     enter_dismiss_result(core, state_machine)
     core.process(SceneObservation(result=True), None, 1.18, CLIENT)
 
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
     core.process(SceneObservation(), None, 1.80, CLIENT)
     assert len(
         [event for event in input_service.events if isinstance(event, tuple)]
@@ -899,11 +919,11 @@ def test_result_disappearance_prevents_retry_and_ready_counts_once() -> None:
     assert {
         "event": "result.dismiss_confirmed",
         "attempts": 1,
-        "signal": "ready_hook",
+        "signal": "click_succeeded",
     } in runtime_log.events
 
 
-def test_result_absence_alone_does_not_complete_without_ready_hook() -> None:
+def test_followup_visual_absence_does_not_change_completed_round() -> None:
     runtime_log = RecordingRuntimeLog()
     core, input_service, state_machine = make_core(
         random_uniform=lambda low, _high: low,
@@ -915,15 +935,19 @@ def test_result_absence_alone_does_not_complete_without_ready_hook() -> None:
     for now in (1.20, 1.21, 1.22, 1.23, 1.24):
         core.process(SceneObservation(), None, now, CLIENT)
 
-    assert core.snapshot.state is FishingState.DISMISS_RESULT
-    assert core.snapshot.completed == 0
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
     assert [
         event for event in input_service.events if isinstance(event, tuple)
     ] == [("click", 1024, 396)]
-    assert not any(
-        event["event"] == "result.dismiss_confirmed"
-        for event in runtime_log.events
-    )
+    assert [
+        event for event in runtime_log.events
+        if event["event"] == "result.dismiss_confirmed"
+    ] == [{
+        "event": "result.dismiss_confirmed",
+        "attempts": 1,
+        "signal": "click_succeeded",
+    }]
 
 
 def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:

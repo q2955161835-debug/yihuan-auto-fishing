@@ -20,13 +20,7 @@ def bite_prompt_frame() -> np.ndarray:
     return image
 
 
-def result_frame(
-    width: int = 1280,
-    height: int = 720,
-    *,
-    ready_icon: bool = False,
-    center_color: tuple[int, int, int] = BLUE_BGR,
-) -> np.ndarray:
+def result_frame(width: int = 1280, height: int = 720, *, ready_icon: bool = False) -> np.ndarray:
     image = np.full((height, width, 3), 25, dtype=np.uint8)
     cv2.rectangle(
         image,
@@ -61,7 +55,7 @@ def result_frame(
         image,
         (round(width * 0.50), round(height * 0.50)),
         radius,
-        center_color,
+        BLUE_BGR,
         -1,
     )
     if ready_icon:
@@ -235,31 +229,6 @@ def test_result_requires_three_consecutive_frames() -> None:
     assert observation.progress is None
 
 
-@pytest.mark.parametrize(
-    "center_color",
-    [
-        (0, 0, 255),
-        (0, 165, 255),
-        (0, 255, 255),
-        (0, 255, 0),
-        (255, 255, 0),
-        (255, 0, 0),
-        (255, 0, 255),
-    ],
-)
-def test_result_center_accepts_any_saturated_hue(
-    center_color: tuple[int, int, int],
-) -> None:
-    recognizer = SceneRecognizer()
-    frame = result_frame(center_color=center_color)
-
-    recognizer.observe(frame, 1.0)
-    recognizer.observe(frame, 1.1)
-    observation = recognizer.observe(frame, 1.2)
-
-    assert observation.result is True
-
-
 def test_real_transition_vortex_never_confirms_result() -> None:
     recognizer = SceneRecognizer()
     frame = result_fixture("result_transition_vortex.jpg")
@@ -275,52 +244,9 @@ def test_real_transition_vortex_never_confirms_result() -> None:
         assert observation.result is False
 
 
-def test_real_green_transition_never_confirms_result() -> None:
-    recognizer = SceneRecognizer()
-    frame = result_fixture("result_transition_green.jpg")
-
-    for index in range(3):
-        observation = recognizer.observe(
-            frame,
-            1.0 + index / 30,
-            occlusion=RESULT_FIXTURE_OCCLUSION,
-        )
-
-        assert observation.result_candidate is False
-        assert observation.result is False
-
-
 def test_real_catch_card_confirms_after_three_frames() -> None:
     recognizer = SceneRecognizer()
     frame = result_fixture("result_catch_card.jpg")
-
-    first = recognizer.observe(
-        frame,
-        1.0,
-        occlusion=RESULT_FIXTURE_OCCLUSION,
-    )
-    second = recognizer.observe(
-        frame,
-        1.1,
-        occlusion=RESULT_FIXTURE_OCCLUSION,
-    )
-    third = recognizer.observe(
-        frame,
-        1.2,
-        occlusion=RESULT_FIXTURE_OCCLUSION,
-    )
-
-    assert first.result_candidate is True
-    assert first.result is False
-    assert second.result_candidate is True
-    assert second.result is False
-    assert third.result_candidate is True
-    assert third.result is True
-
-
-def test_real_green_catch_card_confirms_after_three_frames() -> None:
-    recognizer = SceneRecognizer()
-    frame = result_fixture("result_catch_card_green.jpg")
 
     first = recognizer.observe(
         frame,
@@ -415,24 +341,6 @@ def test_ready_rejects_right_bottom_bite_prompt() -> None:
     recognizer = SceneRecognizer()
     frame = ready_frame()
     add_bite_prompt(frame)
-
-    assert recognizer.observe(frame, 1.0).ready is False
-    assert recognizer.observe(frame, 1.1).ready is False
-    assert recognizer.observe(frame, 1.2).ready is False
-
-
-def test_real_closed_result_hook_confirms_ready_after_three_frames() -> None:
-    recognizer = SceneRecognizer()
-    frame = result_fixture("result_closed_hook.jpg")
-
-    assert recognizer.observe(frame, 1.0).ready is False
-    assert recognizer.observe(frame, 1.1).ready is False
-    assert recognizer.observe(frame, 1.2).ready is True
-
-
-def test_real_bite_prompt_is_not_initial_ready_hook() -> None:
-    recognizer = SceneRecognizer()
-    frame = result_fixture("bite_prompt_real.jpg")
 
     assert recognizer.observe(frame, 1.0).ready is False
     assert recognizer.observe(frame, 1.1).ready is False

@@ -12,7 +12,6 @@ class Event(Enum):
     BAR_GONE = auto()
     RESULT_DETECTED = auto()
     RESULT_CLICKED = auto()
-    READY_DETECTED = auto()
     INTERVAL_ELAPSED = auto()
     RESUME_CONTROL = auto()
     RESUME_RESULT = auto()
@@ -25,7 +24,6 @@ TRANSITIONS = {
     (FishingState.WAIT_BAR, Event.BAR_DETECTED): FishingState.CONTROL,
     (FishingState.CONTROL, Event.BAR_GONE): FishingState.WAIT_RESULT,
     (FishingState.WAIT_RESULT, Event.RESULT_DETECTED): FishingState.DISMISS_RESULT,
-    (FishingState.DISMISS_RESULT, Event.RESULT_CLICKED): FishingState.DISMISS_RESULT,
     (FishingState.INTER_ROUND, Event.INTERVAL_ELAPSED): FishingState.READY,
     (FishingState.PAUSED, Event.RESUME_CONTROL): FishingState.CONTROL,
     (FishingState.PAUSED, Event.RESUME_RESULT): FishingState.WAIT_RESULT,
@@ -51,7 +49,6 @@ class FishingStateMachine:
         self.entered_at = 0.0
         self.pause_reason = ""
         self.paused_from: FishingState | None = None
-        self.result_clicked = False
 
     def start(self, target: int, now: float) -> None:
         if type(target) is not int or not 1 <= target <= 999:
@@ -63,7 +60,6 @@ class FishingStateMachine:
         self.entered_at = now
         self.pause_reason = ""
         self.paused_from = None
-        self.result_clicked = False
 
     def cancel_current(self, now: float) -> None:
         self.state = FishingState.UNBOUND
@@ -72,16 +68,13 @@ class FishingStateMachine:
         self.entered_at = now
         self.pause_reason = ""
         self.paused_from = None
-        self.result_clicked = False
 
     def handle(self, event: Event, now: float) -> None:
         if (
             self.state is FishingState.DISMISS_RESULT
-            and event is Event.READY_DETECTED
-            and self.result_clicked
+            and event is Event.RESULT_CLICKED
         ):
             self.completed += 1
-            self.result_clicked = False
             self.state = (
                 FishingState.COMPLETE
                 if self.completed >= self.target
@@ -101,11 +94,6 @@ class FishingStateMachine:
         if next_state is None:
             raise ValueError(f"illegal event {event.name} in state {self.state.name}")
 
-        if event is Event.RESULT_CLICKED:
-            self.result_clicked = True
-        else:
-            self.result_clicked = False
-
         if event is Event.RESUME_RESULT:
             self.pause_reason = ""
 
@@ -118,7 +106,6 @@ class FishingStateMachine:
         self.state = FishingState.PAUSED
         self.pause_reason = reason
         self.entered_at = now
-        self.result_clicked = False
 
     def check_timeout(self, now: float) -> bool:
         timeout = TIMEOUTS.get(self.state)
