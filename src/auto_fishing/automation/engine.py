@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from random import uniform as real_uniform
 from typing import Any
 
 import numpy as np
@@ -56,14 +58,21 @@ class AutomationCore:
         controller: Any,
         input_service: Any,
         scene_recognizer: Any,
+        random_uniform: Callable[[float, float], float] = real_uniform,
+        event_recorder: Any | None = None,
     ) -> None:
         self.state_machine = state_machine
         self.controller = controller
         self.input_service = input_service
         self.scene_recognizer = scene_recognizer
+        self.random_uniform = random_uniform
+        self.event_recorder = event_recorder
         self.bar_missing_frames = 0
         self.bar_valid_frames = 0
         self.result_candidate_frames = 0
+        self.result_click_attempts = 0
+        self.result_next_click_at: float | None = None
+        self.result_waiting_logged = False
         self.pause_code = ""
         self._error = ""
         self._fps = 0.0
@@ -87,6 +96,7 @@ class AutomationCore:
             self.bar_missing_frames = 0
             self.bar_valid_frames = 0
             self.result_candidate_frames = 0
+            self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
             self._fps = 0.0
@@ -158,6 +168,7 @@ class AutomationCore:
             self.bar_missing_frames = 0
             self.bar_valid_frames = 0
             self.result_candidate_frames = 0
+            self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
             self._input_blocked.clear()
@@ -174,6 +185,7 @@ class AutomationCore:
             self.bar_missing_frames = 0
             self.bar_valid_frames = 0
             self.result_candidate_frames = 0
+            self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
             self._fps = 0.0
@@ -240,6 +252,8 @@ class AutomationCore:
         elif state is FishingState.WAIT_RESULT and observation.result:
             self._input(self.input_service.release_all)
             self.state_machine.handle(Event.RESULT_DETECTED, now)
+            self._reset_result_dismissal()
+            self._schedule_result_click(now, 0.18, 0.42)
         elif state is FishingState.DISMISS_RESULT:
             self._dismiss_result(observation, now, client_rect)
         elif (
@@ -306,16 +320,105 @@ class AutomationCore:
         now: float,
         client_rect: Rect | None,
     ) -> None:
-        if not self.state_machine.result_clicked:
-            if not observation.result or client_rect is None:
-                return
-            x = client_rect.left + round(client_rect.width * 0.15)
-            y = client_rect.top + round(client_rect.height * 0.55)
-            self._input(lambda: self.input_service.click(x, y))
-            self.state_machine.handle(Event.RESULT_CLICKED, now)
-            return
-        if observation.ready:
+        if observation.ready and self.state_machine.result_clicked:
             self.state_machine.handle(Event.READY_DETECTED, now)
+            self._reset_result_dismissal()
+            return
+
+        if self.result_next_click_at is None:
+            if observation.result:
+                self._schedule_result_click(now, 0.18, 0.42)
+            return
+        if now < self.result_next_click_at:
+            return
+        if not observation.result:
+            if self.state_machine.result_clicked and not self.result_waiting_logged:
+                self._record(
+                    "result.dismiss_waiting",
+                    attempts=self.result_click_attempts,
+                )
+                self.result_waiting_logged = True
+            return
+        if self.result_click_attempts >= 3:
+            self._record(
+                "result.dismiss_failed",
+                attempts=self.result_click_attempts,
+            )
+            self.pause(
+                "真实鱼获卡片连续三次点击后仍未关闭",
+                now,
+                code="E_RESULT_DISMISS",
+            )
+            return
+        if client_rect is None:
+            return
+
+        point = self._result_click_point(client_rect)
+        if point is None:
+            self.pause(
+                "Windows 屏幕键盘遮挡全部结算安全点击点",
+                now,
+                code="E_OSK",
+            )
+            return
+        x, y = point
+        attempt = self.result_click_attempts + 1
+        self._record(
+            "result.dismiss_attempt",
+            attempt=attempt,
+            x=x,
+            y=y,
+            result=observation.result,
+        )
+        self._input(lambda: self.input_service.click(x, y))
+        self.result_click_attempts = attempt
+        self.result_waiting_logged = False
+        if attempt == 1:
+            self.state_machine.handle(Event.RESULT_CLICKED, now)
+        self._schedule_result_click(now, 0.40, 0.80)
+
+    def _schedule_result_click(
+        self,
+        now: float,
+        minimum: float,
+        maximum: float,
+    ) -> None:
+        delay = float(self.random_uniform(minimum, maximum))
+        if not math.isfinite(delay):
+            raise ValueError("结算点击随机延迟必须为有限数")
+        delay = min(maximum, max(minimum, delay))
+        self.result_next_click_at = now + delay
+        self._record(
+            "result.dismiss_scheduled",
+            attempt=min(self.result_click_attempts + 1, 3),
+            delay=delay,
+            scheduled_at=self.result_next_click_at,
+        )
+
+    def _result_click_point(self, client_rect: Rect) -> tuple[int, int] | None:
+        occlusion = self.input_service.occlusion_rect()
+        for horizontal, vertical in (
+            (0.80, 0.55),
+            (0.85, 0.45),
+            (0.70, 0.35),
+        ):
+            x = client_rect.left + round(client_rect.width * horizontal)
+            y = client_rect.top + round(client_rect.height * vertical)
+            if occlusion is None or not (
+                occlusion.left <= x < occlusion.right
+                and occlusion.top <= y < occlusion.bottom
+            ):
+                return x, y
+        return None
+
+    def _reset_result_dismissal(self) -> None:
+        self.result_click_attempts = 0
+        self.result_next_click_at = None
+        self.result_waiting_logged = False
+
+    def _record(self, name: str, **fields: object) -> None:
+        if self.event_recorder is not None:
+            self.event_recorder.event(name, **fields)
 
 
 class AutomationEngine:

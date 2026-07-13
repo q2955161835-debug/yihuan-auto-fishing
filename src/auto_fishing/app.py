@@ -572,6 +572,7 @@ class Application:
             controller=ProgressController(),
             input_service=safe_input,
             scene_recognizer=scene_recognizer,
+            event_recorder=runtime_log,
         )
         diagnostics = DiagnosticsStore(data_dir / "diagnostics")
         engine = AutomationEngine(
