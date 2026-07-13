@@ -284,6 +284,22 @@ def test_close_saves_position_and_shuts_down_controller(root) -> None:
     assert root.winfo_exists() == 0
 
 
+def test_auto_activate_setting_is_visible_and_saved(root) -> None:
+    root.withdraw()
+    controller = FakeController()
+    settings = FakeSettings(AppSettings(auto_activate_game=False))
+    window = MainWindow(root, controller, settings)
+
+    assert window.auto_activate_var.get() is False
+    assert window.auto_activate_check.cget("text") == "自动切回游戏"
+
+    window.auto_activate_var.set(True)
+    window.close()
+
+    assert settings.saved is not None
+    assert settings.saved.auto_activate_game is True
+
+
 class ManualScheduler:
     def __init__(self) -> None:
         self.delays: list[int] = []

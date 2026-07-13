@@ -39,6 +39,10 @@ class MainWindow:
         self.count_var = tk.StringVar(
             master=root, value=str(self.settings.target_count)
         )
+        self.auto_activate_var = tk.BooleanVar(
+            master=root,
+            value=self.settings.auto_activate_game,
+        )
         self.state_var = tk.StringVar(
             master=root, value=FishingState.UNBOUND.value
         )
@@ -120,6 +124,18 @@ class MainWindow:
             buttons, text="重新绑定", command=self.on_rebind
         )
         self.rebind_button.grid(row=1, column=0, padx=2, pady=3, sticky="ew")
+        self.auto_activate_check = ttk.Checkbutton(
+            buttons,
+            text="自动切回游戏",
+            variable=self.auto_activate_var,
+        )
+        self.auto_activate_check.grid(
+            row=1,
+            column=1,
+            padx=2,
+            pady=3,
+            sticky="w",
+        )
         ttk.Button(buttons, text="退出", command=self.close).grid(
             row=1, column=2, padx=2, pady=3, sticky="ew"
         )
@@ -316,6 +332,7 @@ class MainWindow:
             target_count=target,
             window_x=self.root.winfo_x(),
             window_y=self.root.winfo_y(),
+            auto_activate_game=bool(self.auto_activate_var.get()),
         )
         try:
             self.settings_store.save(settings)

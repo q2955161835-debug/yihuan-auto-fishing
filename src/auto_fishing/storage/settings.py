@@ -9,6 +9,7 @@ class AppSettings:
     target_count: int = 1
     window_x: int = 20
     window_y: int = 20
+    auto_activate_game: bool = True
 
 
 class SettingsStore:
@@ -24,9 +25,12 @@ class SettingsStore:
                 return AppSettings()
             count = min(999, max(1, _finite_int(raw.get("target_count", 1))))
             return AppSettings(
-                count,
-                _finite_int(raw.get("window_x", 20)),
-                _finite_int(raw.get("window_y", 20)),
+                target_count=count,
+                window_x=_finite_int(raw.get("window_x", 20)),
+                window_y=_finite_int(raw.get("window_y", 20)),
+                auto_activate_game=_strict_bool(
+                    raw.get("auto_activate_game", True)
+                ),
             )
         except (
             OSError,
@@ -50,3 +54,7 @@ def _finite_int(value: object) -> int:
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("setting value must be finite")
     return int(value)
+
+
+def _strict_bool(value: object, default: bool = True) -> bool:
+    return value if isinstance(value, bool) else default

@@ -22,6 +22,24 @@ def test_settings_round_trip(tmp_path):
     assert store.load() == expected
 
 
+def test_settings_auto_activate_defaults_true_and_round_trips(tmp_path) -> None:
+    store = SettingsStore(tmp_path / "config.json")
+
+    assert store.load().auto_activate_game is True
+
+    store.save(AppSettings(auto_activate_game=False))
+
+    assert store.load().auto_activate_game is False
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", None])
+def test_settings_reject_non_boolean_auto_activate(tmp_path, value) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"auto_activate_game": value}), "utf-8")
+
+    assert SettingsStore(path).load().auto_activate_game is True
+
+
 @pytest.mark.parametrize("root_value", [[], "invalid", None])
 def test_settings_non_object_json_returns_defaults(tmp_path, root_value):
     path = tmp_path / "config.json"
