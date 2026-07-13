@@ -42,6 +42,12 @@ _OSK_CLASS = "OSKMainClass"
 _HWND_TOPMOST = -1
 _SWP_SHOWWINDOW = 0x0040
 _WM_CLOSE = 0x0010
+_CANONICAL_OUTER_WIDTH = 1365
+_CANONICAL_OUTER_HEIGHT = 415
+_MIN_CLIENT_WIDTH = 900
+_MIN_CLIENT_HEIGHT = 250
+_MIN_CLIENT_ASPECT_RATIO = 3.2
+_MAX_CLIENT_ASPECT_RATIO = 3.9
 
 
 class _WinRect(ctypes.Structure):
@@ -129,11 +135,15 @@ class Win32KeyboardApi:
         self,
         hwnd: int,
         monitor_rect: Rect,
-        max_width: int,
+        target_width: int,
     ) -> None:
-        current = self.window_rect(hwnd)
-        width = min(current.width, max_width)
-        height = round(current.height * width / current.width)
+        width = min(target_width, monitor_rect.width)
+        height = round(width * _CANONICAL_OUTER_HEIGHT / _CANONICAL_OUTER_WIDTH)
+        if height > monitor_rect.height:
+            height = monitor_rect.height
+            width = round(
+                height * _CANONICAL_OUTER_WIDTH / _CANONICAL_OUTER_HEIGHT
+            )
         positioned = self.user32.SetWindowPos(
             hwnd,
             _HWND_TOPMOST,
@@ -257,6 +267,8 @@ class OnScreenKeyboardWindow:
         self._owned = False
         self._hwnd = 0
         self._geometry: KeyboardGeometry | None = None
+        self._monitor_rect: Rect | None = None
+        self._game_client: Rect | None = None
 
     def ensure(self, monitor_rect: Rect, game_client: Rect) -> KeyboardGeometry:
         hwnd = int(self.api.find_window() or 0)
@@ -272,12 +284,21 @@ class OnScreenKeyboardWindow:
             raise OnScreenKeyboardError("启动 Windows 屏幕键盘超时")
 
         self._hwnd = hwnd
+        self._monitor_rect = monitor_rect
+        self._game_client = game_client
         position_denied: OnScreenKeyboardPositionDenied | None = None
         try:
+            target_width = min(
+                monitor_rect.width,
+                max(
+                    _CANONICAL_OUTER_WIDTH,
+                    round(game_client.width * 2 / 3),
+                ),
+            )
             self.api.position_bottom_left(
                 hwnd,
                 monitor_rect,
-                round(game_client.width * 0.80),
+                target_width,
             )
         except OnScreenKeyboardPositionDenied as error:
             position_denied = error
@@ -299,12 +320,20 @@ class OnScreenKeyboardWindow:
             raise OnScreenKeyboardError("Windows 屏幕键盘尚未准备")
         self.api.validate_window(self._hwnd)
         self._geometry = self._read_geometry(self._hwnd)
+        if self._monitor_rect is not None and self._game_client is not None:
+            self._validate_placement(
+                self._geometry,
+                self._monitor_rect,
+                self._game_client,
+            )
         return self._geometry
 
     def close(self) -> None:
         hwnd = self._hwnd
         self._hwnd = 0
         self._geometry = None
+        self._monitor_rect = None
+        self._game_client = None
         if self._owned and hwnd:
             try:
                 self.api.close_window(hwnd)
@@ -320,6 +349,20 @@ class OnScreenKeyboardWindow:
         client_rect = self.api.client_rect_on_screen(hwnd)
         if client_rect.width <= 0 or client_rect.height <= 0:
             raise OnScreenKeyboardError("Windows 屏幕键盘客户区尺寸无效")
+        client_aspect_ratio = client_rect.width / client_rect.height
+        if (
+            client_rect.width < _MIN_CLIENT_WIDTH
+            or client_rect.height < _MIN_CLIENT_HEIGHT
+            or not (
+                _MIN_CLIENT_ASPECT_RATIO
+                <= client_aspect_ratio
+                <= _MAX_CLIENT_ASPECT_RATIO
+            )
+        ):
+            raise OnScreenKeyboardError(
+                "Windows 屏幕键盘布局尺寸异常，已拒绝点击；"
+                "请恢复完整键盘布局后重新绑定"
+            )
         key_points = {
             key: (
                 client_rect.left + round(client_rect.width * x_ratio),

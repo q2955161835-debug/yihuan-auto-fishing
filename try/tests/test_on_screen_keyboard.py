@@ -112,8 +112,30 @@ def test_ensure_reuses_existing_keyboard_without_owning_it() -> None:
 
     assert geometry.hwnd == 55
     assert launcher.started == 0
-    assert api.positioned == [(55, MONITOR, 1536)]
+    assert api.positioned == [(55, MONITOR, 1365)]
     assert api.closed == []
+
+
+def test_ensure_uses_stable_wide_screen_target_on_repeated_bindings() -> None:
+    monitor = Rect(0, 0, 2560, 1440)
+    api = FakeKeyboardApi(
+        [55],
+        window_rect=Rect(0, 921, 1706, 1440),
+        client_rect=Rect(9, 959, 1697, 1431),
+    )
+    keyboard = OnScreenKeyboardWindow(
+        api=api,
+        launcher=FakeLauncher(),
+        sleep=lambda _: None,
+    )
+
+    keyboard.ensure(monitor, monitor)
+    keyboard.ensure(monitor, monitor)
+
+    assert api.positioned == [
+        (55, monitor, 1707),
+        (55, monitor, 1707),
+    ]
 
 
 def test_ensure_launches_missing_keyboard_and_closes_owned_window() -> None:
@@ -189,6 +211,7 @@ class FakeUser32:
         self.messages: list[tuple[int, int]] = []
         self.position_result = 1
         self.post_result = 1
+        self.window_rect = Rect(80, 80, 1445, 495)
 
     def FindWindowW(self, class_name: str, title: object) -> int:
         assert class_name == "OSKMainClass"
@@ -210,7 +233,10 @@ class FakeUser32:
 
     def GetWindowRect(self, hwnd: int, rect_pointer: object) -> int:
         rect = rect_pointer._obj
-        rect.left, rect.top, rect.right, rect.bottom = 80, 80, 1445, 495
+        rect.left = self.window_rect.left
+        rect.top = self.window_rect.top
+        rect.right = self.window_rect.right
+        rect.bottom = self.window_rect.bottom
         return 1
 
     def GetClientRect(self, hwnd: int, rect_pointer: object) -> int:
@@ -253,6 +279,50 @@ def test_win32_api_reads_valid_keyboard_geometry_and_positions_bottom_left() -> 
     assert api.window_rect(hwnd) == Rect(80, 80, 1445, 495)
     assert api.client_rect_on_screen(hwnd) == Rect(87, 110, 1437, 487)
     assert user32.positioned == [(55, 0, 776, 1000, 304, 0x0040)]
+
+
+def test_win32_api_restores_canonical_size_instead_of_reusing_shrunken_size() -> None:
+    user32 = FakeUser32()
+    user32.window_rect = Rect(0, 877, 650, 1080)
+    api = Win32KeyboardApi(user32=user32)
+
+    api.position_bottom_left(55, MONITOR, 1365)
+
+    assert user32.positioned == [(55, 0, 665, 1365, 415, 0x0040)]
+
+
+def test_ensure_rejects_responsive_keyboard_layout_before_mapping_keys() -> None:
+    keyboard = OnScreenKeyboardWindow(
+        api=FakeKeyboardApi(
+            [55],
+            window_rect=Rect(0, 877, 650, 1080),
+            client_rect=Rect(9, 915, 641, 1071),
+        ),
+        launcher=FakeLauncher(),
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(OnScreenKeyboardError, match="布局尺寸异常"):
+        keyboard.ensure(MONITOR, GAME_CLIENT)
+
+
+def test_geometry_rejects_keyboard_resized_after_prepare_before_mouse_input() -> None:
+    api = FakeKeyboardApi([55])
+    window = OnScreenKeyboardWindow(
+        api=api,
+        launcher=FakeLauncher(),
+        sleep=lambda _: None,
+    )
+    window.ensure(MONITOR, GAME_CLIENT)
+    api._window_rect = Rect(0, 877, 650, 1080)
+    api._client_rect = Rect(9, 915, 641, 1071)
+    mouse = RecordingMouse()
+    backend = OnScreenKeyboardInputBackend(window=window, mouse=mouse)
+
+    with pytest.raises(OnScreenKeyboardError, match="布局尺寸异常"):
+        backend.key_down("F")
+
+    assert mouse.events == []
 
 
 def test_real_win32_api_declares_pointer_width_set_window_pos(monkeypatch) -> None:
