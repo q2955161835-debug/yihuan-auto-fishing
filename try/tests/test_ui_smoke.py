@@ -17,6 +17,7 @@ class FakeController:
     def __init__(self) -> None:
         self.calls: list[object] = []
         self.bind_callbacks = None
+        self.bind_start_callbacks = None
         self.rebind_callbacks = None
         self.start_callbacks = None
         self.resume_callbacks = None
@@ -24,6 +25,12 @@ class FakeController:
     def bind_after_countdown(self, on_tick, on_done) -> None:
         self.calls.append("bind")
         self.bind_callbacks = (on_tick, on_done)
+
+    def bind_and_start_after_countdown(
+        self, target, on_tick, on_done
+    ) -> None:
+        self.calls.append(("bind_and_start", target))
+        self.bind_start_callbacks = (on_tick, on_done)
 
     def rebind(self, on_tick, on_done) -> None:
         self.calls.append("rebind")
@@ -90,7 +97,11 @@ def root(tk_master):
 def test_window_is_topmost_and_validates_count(root) -> None:
     root.withdraw()
     controller = FakeController()
-    window = MainWindow(root, controller, FakeSettings())
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
     root.update_idletasks()
     assert root.attributes("-topmost") == 1
 
@@ -102,9 +113,9 @@ def test_window_is_topmost_and_validates_count(root) -> None:
     window.on_start()
     assert controller.calls == []
 
-    window.on_bind()
-    assert controller.bind_callbacks is not None
-    _on_tick, on_done = controller.bind_callbacks
+    window.on_rebind()
+    assert controller.rebind_callbacks is not None
+    _on_tick, on_done = controller.rebind_callbacks
     on_done("异环", None)
     controller.calls.clear()
     window.on_start()
@@ -124,10 +135,14 @@ def test_window_is_topmost_and_validates_count(root) -> None:
 
 def test_successful_start_countdown_keeps_controls_locked_until_snapshot(root) -> None:
     controller = FakeController()
-    window = MainWindow(root, controller, FakeSettings())
-    window.on_bind()
-    assert controller.bind_callbacks is not None
-    _on_tick, on_bind_done = controller.bind_callbacks
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
+    window.on_rebind()
+    assert controller.rebind_callbacks is not None
+    _on_tick, on_bind_done = controller.rebind_callbacks
     on_bind_done("异环", None)
 
     window.on_start()
@@ -175,12 +190,12 @@ def test_binding_callbacks_update_visible_status(root) -> None:
     controller = FakeController()
     window = MainWindow(root, controller, FakeSettings())
     window.on_bind()
-    assert controller.calls == ["bind"]
+    assert controller.calls == [("bind_and_start", 1)]
     assert window.start_button.instate(["disabled"])
     window.on_start()
-    assert controller.calls == ["bind"]
-    assert controller.bind_callbacks is not None
-    on_tick, on_done = controller.bind_callbacks
+    assert controller.calls == [("bind_and_start", 1)]
+    assert controller.bind_start_callbacks is not None
+    on_tick, on_done = controller.bind_start_callbacks
 
     for seconds in (3, 2, 1):
         on_tick(seconds)
@@ -188,14 +203,70 @@ def test_binding_callbacks_update_visible_status(root) -> None:
     on_done("异环", None)
     assert window.binding_var.get() == "已绑定：异环"
 
-    window.on_rebind()
-    assert controller.calls[-1] == "rebind"
+    assert window.bind_button.instate(["disabled"])
+    assert window.rebind_button.instate(["disabled"])
+
+
+def test_bind_button_uses_one_countdown_then_marks_runtime_active(root) -> None:
+    controller = FakeController()
+    window = MainWindow(root, controller, FakeSettings())
+    window.count_var.set("2")
+
+    assert window.bind_button.cget("text") == "绑定并开始"
+    window.on_bind()
+
+    assert controller.calls == [("bind_and_start", 2)]
+    assert controller.bind_start_callbacks is not None
+    on_tick, on_done = controller.bind_start_callbacks
+    on_tick(3)
+    assert window.binding_var.get() == "绑定倒计时：3"
+    on_done("异环", None)
+
+    assert window.binding_var.get() == "已绑定：异环"
+    assert window.start_button.instate(["disabled"])
+    assert window.pause_button.instate(["!disabled"])
+
+
+def test_start_and_resume_use_explicit_activation_when_enabled(root) -> None:
+    controller = FakeController()
+    window = MainWindow(root, controller, FakeSettings())
+    window._has_binding = True
+    window._refresh_control_states()
+
+    window.on_start()
+    assert controller.calls[-1] == ("start", 1, True)
+
+    window.apply_snapshot(RuntimeSnapshot(FishingState.PAUSED, 0, 1, 30.0))
+    window.on_pause_or_resume()
+    assert controller.calls[-1] == ("resume", True)
+
+
+def test_start_and_resume_keep_manual_countdown_when_activation_disabled(
+    root,
+) -> None:
+    controller = FakeController()
+    settings = FakeSettings(AppSettings(auto_activate_game=False))
+    window = MainWindow(root, controller, settings)
+    window._has_binding = True
+    window._refresh_control_states()
+
+    window.on_start()
+    assert controller.calls[-1] == ("start_after_countdown", 1)
+
+    window._on_start_done("测试取消")
+    window.apply_snapshot(RuntimeSnapshot(FishingState.PAUSED, 0, 1, 30.0))
+    window.on_pause_or_resume()
+    assert controller.calls[-1] == "resume_after_countdown"
 
 
 def test_snapshot_is_queued_on_tk_thread_and_locks_runtime_controls(root) -> None:
     root.withdraw()
     controller = FakeController()
-    window = MainWindow(root, controller, FakeSettings())
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
     original_after = root.after
     scheduled: list[tuple[int, object]] = []
     root.after = lambda delay, callback: scheduled.append((delay, callback))  # type: ignore[method-assign]
@@ -492,6 +563,57 @@ def test_controller_counts_down_asynchronously_before_binding() -> None:
     assert completed == [("异环", None)]
 
 
+def test_controller_binds_and_starts_after_one_countdown() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    window_service = BindingService()
+    controller = AppController(engine, window_service, scheduler)
+    ticks: list[int] = []
+    completed: list[tuple[str | None, str | None]] = []
+
+    controller.bind_and_start_after_countdown(
+        2,
+        ticks.append,
+        lambda title, error: completed.append((title, error)),
+    )
+
+    assert ticks == [3]
+    for _ in range(3):
+        scheduler.run_next(1000)
+
+    assert window_service.calls == 1
+    assert engine.calls == [
+        ("bind", window_service.bound),
+        ("start", 2),
+    ]
+    assert completed == [("异环", None)]
+
+
+def test_f8_cancels_pending_bind_and_start_before_engine_calls() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    window_service = BindingService()
+    controller = AppController(engine, window_service, scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    completed: list[tuple[str | None, str | None]] = []
+
+    controller.bind_and_start_after_countdown(
+        2,
+        lambda _seconds: None,
+        lambda title, error: completed.append((title, error)),
+    )
+    controller.pause("F8 紧急暂停")
+    scheduler.run_next(10)
+    while 1000 in scheduler.pending_delays:
+        scheduler.run_next(1000)
+
+    assert completed == [
+        (None, "绑定并开始倒计时已被紧急暂停取消")
+    ]
+    assert window_service.calls == 0
+    assert not any(call == ("start", 2) for call in engine.calls)
+
+
 def test_controller_counts_down_before_starting_engine() -> None:
     scheduler = ManualScheduler()
     engine = BridgeEngine()
@@ -697,9 +819,13 @@ def test_failed_rebind_preserves_old_binding_and_can_start(root) -> None:
         SequenceBindingService(old_bound, RuntimeError("新窗口无效")),
         scheduler,
     )
-    window = MainWindow(root, controller, FakeSettings())
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
 
-    window.on_bind()
+    window.on_rebind()
     for _ in range(3):
         scheduler.run_next(1000)
     assert window.binding_var.get() == "已绑定：旧窗口"

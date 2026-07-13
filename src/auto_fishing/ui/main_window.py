@@ -108,7 +108,7 @@ class MainWindow:
             buttons.columnconfigure(column, weight=1)
 
         self.bind_button = ttk.Button(
-            buttons, text="绑定游戏", command=self.on_bind
+            buttons, text="绑定并开始", command=self.on_bind
         )
         self.bind_button.grid(row=0, column=0, padx=2, sticky="ew")
         self.start_button = ttk.Button(buttons, text="开始", command=self.on_start)
@@ -145,12 +145,31 @@ class MainWindow:
         )
 
     def on_bind(self) -> None:
-        self._begin_binding(self.controller.bind_after_countdown)
+        target = self._target_count()
+        if target is None:
+            self.error_var.set("数量必须是 1～999 的整数")
+            return
+        self._begin_binding(
+            lambda on_tick, on_done: (
+                self.controller.bind_and_start_after_countdown(
+                    target,
+                    on_tick,
+                    on_done,
+                )
+            ),
+            on_done=self._on_bind_start_done,
+        )
 
     def on_rebind(self) -> None:
         self._begin_binding(self.controller.rebind, allow_paused=True)
 
-    def _begin_binding(self, action: Any, *, allow_paused: bool = False) -> None:
+    def _begin_binding(
+        self,
+        action: Any,
+        *,
+        allow_paused: bool = False,
+        on_done: Any | None = None,
+    ) -> None:
         if self._countdown_active or (
             self._runtime_active
             and not (allow_paused and self._state is FishingState.PAUSED)
@@ -158,10 +177,11 @@ class MainWindow:
             return
         self._countdown_active = True
         self._refresh_control_states()
+        done = on_done or self._on_bind_done
         try:
-            action(self._on_bind_tick, self._on_bind_done)
+            action(self._on_bind_tick, done)
         except Exception as error:
-            self._on_bind_done(None, str(error))
+            done(None, str(error))
 
     def _on_bind_tick(self, seconds: int) -> None:
         self.binding_var.set(f"绑定倒计时：{seconds}")
@@ -180,6 +200,16 @@ class MainWindow:
             self.error_var.set("无")
         self._refresh_control_states()
 
+    def _on_bind_start_done(
+        self,
+        title: str | None,
+        error: str | None,
+    ) -> None:
+        self._on_bind_done(title, error)
+        if title and not error:
+            self._runtime_active = True
+            self._refresh_control_states()
+
     def on_start(self) -> None:
         if (
             self._start_block_reason
@@ -196,11 +226,15 @@ class MainWindow:
         self.error_var.set("无")
         self._refresh_control_states()
         try:
-            self.controller.start_after_countdown(
-                target,
-                self._on_start_tick,
-                self._on_start_done,
-            )
+            if self.auto_activate_var.get():
+                self.controller.start(target, activate=True)
+                self._on_start_done(None)
+            else:
+                self.controller.start_after_countdown(
+                    target,
+                    self._on_start_tick,
+                    self._on_start_done,
+                )
         except Exception as error:
             self._on_start_done(str(error))
 
@@ -223,10 +257,14 @@ class MainWindow:
                 self._countdown_active = True
                 self.error_var.set("无")
                 self._refresh_control_states()
-                self.controller.resume_after_countdown(
-                    self._on_resume_tick,
-                    self._on_resume_done,
-                )
+                if self.auto_activate_var.get():
+                    self.controller.resume(activate=True)
+                    self._on_resume_done(None)
+                else:
+                    self.controller.resume_after_countdown(
+                        self._on_resume_tick,
+                        self._on_resume_done,
+                    )
             else:
                 self.controller.pause()
         except Exception as error:
