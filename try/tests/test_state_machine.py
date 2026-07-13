@@ -13,7 +13,6 @@ ROUND_EVENTS = (
     Event.REEL_SENT,
     Event.BAR_DETECTED,
     Event.BAR_GONE,
-    Event.RESULT_DETECTED,
     Event.RESULT_CLICKED,
 )
 
@@ -55,7 +54,6 @@ def reach_state(state: FishingState, now: float = 10.0) -> FishingStateMachine:
             Event.BAR_DETECTED,
             Event.BAR_GONE,
         ),
-        FishingState.DISMISS_RESULT: ROUND_EVENTS[:-1],
         FishingState.INTER_ROUND: ROUND_EVENTS,
     }
     for event in events_by_state[state]:
@@ -72,7 +70,6 @@ def test_one_round_counts_immediately_after_result_click_succeeds() -> None:
         (Event.REEL_SENT, 2.0),
         (Event.BAR_DETECTED, 2.1),
         (Event.BAR_GONE, 4.0),
-        (Event.RESULT_DETECTED, 4.1),
         (Event.RESULT_CLICKED, 4.2),
     ):
         state_machine.handle(event, now)
@@ -81,8 +78,8 @@ def test_one_round_counts_immediately_after_result_click_succeeds() -> None:
     assert state_machine.state is FishingState.COMPLETE
 
 
-def test_result_click_before_result_detection_is_illegal_and_does_not_count() -> None:
-    state_machine = reach_state(FishingState.WAIT_RESULT)
+def test_result_click_before_bar_disappearance_is_illegal_and_does_not_count() -> None:
+    state_machine = reach_state(FishingState.CONTROL)
     before = stateful_values(state_machine)
 
     with pytest.raises(ValueError, match="RESULT_CLICKED"):
@@ -223,17 +220,6 @@ def test_wait_result_pause_can_resume_for_result_reconfirmation() -> None:
     state_machine = reach_state(FishingState.WAIT_RESULT)
     state_machine.pause("窗口失去前台", 11.0)
 
-    state_machine.handle(Event.RESUME_RESULT, 12.0)
-
-    assert state_machine.state is FishingState.WAIT_RESULT
-    assert state_machine.entered_at == 12.0
-    assert state_machine.pause_reason == ""
-
-
-def test_dismiss_result_pause_resumes_via_wait_result_before_click() -> None:
-    state_machine = reach_state(FishingState.DISMISS_RESULT)
-
-    state_machine.pause("F8", 11.0)
     state_machine.handle(Event.RESUME_RESULT, 12.0)
 
     assert state_machine.state is FishingState.WAIT_RESULT

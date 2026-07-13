@@ -525,7 +525,7 @@ class AbaRecognizer(ScriptedRecognizer):
             self.b_entered.set()
             assert self.allow_b.wait(timeout=1)
             self.b_returned.set()
-            return SceneObservation(result=True)
+            return SceneObservation(ready=True)
         return super().observe(frame, timestamp, occlusion=occlusion)
 
 
@@ -609,18 +609,17 @@ class LateReleaseCoreProxy:
 
 def single_round_observations(
     *,
-    result_frames: int = 2,
+    result_frames: int = 3,
 ) -> list[SceneObservation]:
     progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
     return [
         SceneObservation(),
         SceneObservation(bite=True),
-        SceneObservation(progress=progress),
-        SceneObservation(progress=progress),
-        SceneObservation(result_candidate=True),
-        SceneObservation(result_candidate=True),
-        *[SceneObservation(result=True) for _ in range(result_frames)],
-        SceneObservation(ready=True),
+        # The first progress frame only changes WAIT_BAR to CONTROL; the next
+        # fifteen frames establish a stable bar before disappearance.
+        *[SceneObservation(progress=progress) for _ in range(16)],
+        *[clean_progress_disappearance() for _ in range(3)],
+        *[SceneObservation() for _ in range(result_frames)],
     ]
 
 
@@ -662,7 +661,7 @@ def make_core(
     return core, input_service, state_machine
 
 
-def enter_dismiss_result(
+def enter_wait_result(
     core: AutomationCore,
     state_machine: FishingStateMachine,
     *,
@@ -672,9 +671,23 @@ def enter_dismiss_result(
     state_machine.handle(Event.CAST_SENT, 0.1)
     state_machine.handle(Event.REEL_SENT, 0.2)
     state_machine.handle(Event.BAR_DETECTED, 0.3)
-    state_machine.handle(Event.BAR_GONE, 0.4)
-    core.process(SceneObservation(result=True), None, now, CLIENT)
-    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    progress = ProgressObservation(0.3, 0.7, 0.5, 1.0, 0.0)
+    for index in range(15):
+        core.process(
+            SceneObservation(progress=progress),
+            None,
+            0.31 + index / 30,
+            CLIENT,
+        )
+    missing = SceneObservation(
+        progress_scanlines=0,
+        progress_candidates=0,
+        progress_rejection="yellow_missing",
+    )
+    core.process(missing, None, now - 0.10, CLIENT)
+    core.process(missing, None, now - 0.05, CLIENT)
+    core.process(missing, None, now, CLIENT)
+    assert core.snapshot.state is FishingState.WAIT_RESULT
 
 
 def make_engine(
@@ -790,30 +803,7 @@ def test_engine_pauses_with_e_logging_and_releases_inputs_when_runtime_log_fails
         engine.shutdown()
 
 
-def test_core_counts_round_immediately_after_result_click_succeeds() -> None:
-    core, input_service, _state_machine = make_core()
-    progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
-    sequence = [
-        SceneObservation(),
-        SceneObservation(bite=True),
-        SceneObservation(progress=progress),
-        SceneObservation(progress=progress),
-        SceneObservation(result_candidate=True),
-        SceneObservation(result_candidate=True),
-        SceneObservation(result=True),
-        SceneObservation(result=True),
-    ]
-    core.start(1, 0.0)
-    for index, observation in enumerate(sequence, 1):
-        core.process(observation, None, float(index), CLIENT)
-
-    assert core.snapshot.state is FishingState.COMPLETE
-    assert core.snapshot.completed == 1
-    assert input_service.events.count("F") == 2
-    assert ("click", 1024, 396) in input_service.events
-
-
-def test_result_click_waits_for_random_schedule_and_logs_safe_point() -> None:
+def test_result_click_uses_measured_random_delay_without_visual_confirmation() -> None:
     runtime_log = RecordingRuntimeLog()
     samples: list[tuple[float, float]] = []
 
@@ -825,24 +815,24 @@ def test_result_click_waits_for_random_schedule_and_logs_safe_point() -> None:
         random_uniform=sample,
         event_recorder=runtime_log,
     )
-    enter_dismiss_result(core, state_machine)
+    enter_wait_result(core, state_machine, now=1.0)
 
-    core.process(SceneObservation(result=True), None, 1.179, CLIENT)
+    core.process(SceneObservation(result=True), None, 3.099, CLIENT)
     assert not any(
         isinstance(event, tuple) and event[0] == "click"
         for event in input_service.events
     )
 
-    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+    core.process(SceneObservation(), None, 3.10, CLIENT)
 
     assert ("click", 1024, 396) in input_service.events
-    assert samples == [(0.18, 0.42)]
+    assert samples == [(2.10, 2.60)]
     assert {
         "event": "result.dismiss_attempt",
         "attempt": 1,
         "x": 1024,
         "y": 396,
-        "result": True,
+        "trigger": "timer_elapsed",
     } in runtime_log.events
     assert {
         "event": "result.dismiss_confirmed",
@@ -853,26 +843,15 @@ def test_result_click_waits_for_random_schedule_and_logs_safe_point() -> None:
     assert core.snapshot.completed == 1
 
 
-def test_result_click_does_not_retry_or_wait_when_card_remains() -> None:
-    runtime_log = RecordingRuntimeLog()
-    core, input_service, state_machine = make_core(
-        random_uniform=lambda low, _high: low,
-        event_recorder=runtime_log,
+def test_result_candidate_does_not_end_control_before_clean_bar_disappearance() -> None:
+    core, _input_service, _state_machine = make_core(
+        state=FishingState.CONTROL,
     )
-    enter_dismiss_result(core, state_machine)
 
-    for now in (1.18, 1.58, 1.98):
-        core.process(SceneObservation(result=True), None, now, CLIENT)
-    core.process(SceneObservation(result=True), None, 2.38, CLIENT)
+    core.process(SceneObservation(result_candidate=True), None, 0.1, CLIENT)
+    core.process(SceneObservation(result_candidate=True), None, 0.2, CLIENT)
 
-    clicks = [event for event in input_service.events if isinstance(event, tuple)]
-    assert clicks == [("click", 1024, 396)]
-    assert core.snapshot.state is FishingState.COMPLETE
-    assert core.snapshot.completed == 1
-    assert not any(
-        event["event"] == "result.dismiss_failed"
-        for event in runtime_log.events
-    )
+    assert core.snapshot.state is FishingState.CONTROL
 
 
 def test_failed_result_click_does_not_count_round_as_completed() -> None:
@@ -881,13 +860,13 @@ def test_failed_result_click_does_not_count_round_as_completed() -> None:
         random_uniform=lambda low, _high: low,
         event_recorder=runtime_log,
     )
-    enter_dismiss_result(core, state_machine)
+    enter_wait_result(core, state_machine, now=1.0)
     input_service.failure = InputFailure("result click failed")
 
     with pytest.raises(InputActionError, match="result click failed"):
-        core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+        core.process(SceneObservation(), None, 3.10, CLIENT)
 
-    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    assert core.snapshot.state is FishingState.WAIT_RESULT
     assert core.snapshot.completed == 0
     assert not any(
         event["event"] == "result.dismiss_confirmed"
@@ -895,27 +874,22 @@ def test_failed_result_click_does_not_count_round_as_completed() -> None:
     )
 
 
-def test_result_click_counts_once_without_waiting_for_followup_ready() -> None:
+def test_timed_result_click_counts_only_once_without_followup_observation() -> None:
     runtime_log = RecordingRuntimeLog()
     core, input_service, state_machine = make_core(
         random_uniform=lambda low, _high: low,
         event_recorder=runtime_log,
     )
-    enter_dismiss_result(core, state_machine)
-    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+    enter_wait_result(core, state_machine, now=1.0)
+    core.process(SceneObservation(), None, 3.10, CLIENT)
 
     assert core.snapshot.state is FishingState.COMPLETE
     assert core.snapshot.completed == 1
-    core.process(SceneObservation(), None, 1.80, CLIENT)
+    core.process(SceneObservation(), None, 4.0, CLIENT)
     assert len(
         [event for event in input_service.events if isinstance(event, tuple)]
     ) == 1
 
-    core.process(SceneObservation(ready=True), None, 1.81, CLIENT)
-    core.process(SceneObservation(ready=True), None, 1.82, CLIENT)
-
-    assert core.snapshot.state is FishingState.COMPLETE
-    assert core.snapshot.completed == 1
     assert {
         "event": "result.dismiss_confirmed",
         "attempts": 1,
@@ -923,31 +897,26 @@ def test_result_click_counts_once_without_waiting_for_followup_ready() -> None:
     } in runtime_log.events
 
 
-def test_followup_visual_absence_does_not_change_completed_round() -> None:
-    runtime_log = RecordingRuntimeLog()
-    core, input_service, state_machine = make_core(
-        random_uniform=lambda low, _high: low,
-        event_recorder=runtime_log,
-    )
-    enter_dismiss_result(core, state_machine)
-    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> None:
+    samples: list[tuple[float, float]] = []
 
-    for now in (1.20, 1.21, 1.22, 1.23, 1.24):
-        core.process(SceneObservation(), None, now, CLIENT)
+    def sample(low: float, high: float) -> float:
+        samples.append((low, high))
+        return low
+
+    core, input_service, state_machine = make_core(random_uniform=sample)
+    enter_wait_result(core, state_machine, now=1.0)
+    core.pause("用户暂停", 1.5)
+
+    assert core.resume(SceneObservation(), 2.0) is True
+    assert core.snapshot.state is FishingState.WAIT_RESULT
+
+    core.process(SceneObservation(), None, 4.099, CLIENT)
+    assert not any(isinstance(event, tuple) for event in input_service.events)
+    core.process(SceneObservation(), None, 4.10, CLIENT)
 
     assert core.snapshot.state is FishingState.COMPLETE
-    assert core.snapshot.completed == 1
-    assert [
-        event for event in input_service.events if isinstance(event, tuple)
-    ] == [("click", 1024, 396)]
-    assert [
-        event for event in runtime_log.events
-        if event["event"] == "result.dismiss_confirmed"
-    ] == [{
-        "event": "result.dismiss_confirmed",
-        "attempts": 1,
-        "signal": "click_succeeded",
-    }]
+    assert samples == [(2.10, 2.60), (2.10, 2.60)]
 
 
 def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:
@@ -955,9 +924,9 @@ def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:
         random_uniform=lambda low, _high: low,
     )
     input_service.occlusion = Rect(1000, 350, 1060, 430)
-    enter_dismiss_result(core, state_machine)
+    enter_wait_result(core, state_machine, now=1.0)
 
-    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+    core.process(SceneObservation(), None, 3.10, CLIENT)
 
     assert ("click", 1088, 324) in input_service.events
 
@@ -967,9 +936,9 @@ def test_result_click_pauses_when_all_safe_points_are_occluded() -> None:
         random_uniform=lambda low, _high: low,
     )
     input_service.occlusion = CLIENT
-    enter_dismiss_result(core, state_machine)
+    enter_wait_result(core, state_machine, now=1.0)
 
-    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+    core.process(SceneObservation(), None, 3.10, CLIENT)
 
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_OSK"
@@ -1072,16 +1041,13 @@ def test_early_or_ambiguous_loss_still_pauses(
     assert core.pause_code == "E_PROGRESS_LOST"
 
 
-def test_core_requires_two_result_candidates_before_leaving_control() -> None:
+def test_result_candidates_do_not_end_control() -> None:
     core, input_service, _state_machine = make_core(state=FishingState.CONTROL)
 
     core.process(SceneObservation(result_candidate=True), None, 0.1, CLIENT)
     assert core.snapshot.state is FishingState.CONTROL
     core.process(SceneObservation(result_candidate=True), None, 0.2, CLIENT)
-    assert core.snapshot.state is FishingState.WAIT_RESULT
-    core.process(SceneObservation(), None, 0.3, CLIENT)
-
-    assert core.snapshot.state is FishingState.WAIT_RESULT
+    assert core.snapshot.state is FishingState.CONTROL
     assert not any(isinstance(event, tuple) for event in input_service.events)
 
 
@@ -1100,7 +1066,7 @@ def test_control_keeps_tracking_when_reel_prompt_overlaps_progress_bar() -> None
     assert input_service.events == ["left"]
 
 
-def test_result_candidates_on_sixth_and_seventh_missing_frames_win_over_loss() -> None:
+def test_result_candidate_cannot_override_sixth_frame_progress_loss() -> None:
     core, _input_service, _state_machine = make_core(
         state=FishingState.CONTROL
     )
@@ -1113,35 +1079,6 @@ def test_result_candidates_on_sixth_and_seventh_missing_frames_win_over_loss() -
         5 / 30,
         CLIENT,
     )
-    assert core.snapshot.state is FishingState.CONTROL
-
-    core.process(
-        SceneObservation(result_candidate=True),
-        None,
-        6 / 30,
-        CLIENT,
-    )
-
-    assert core.snapshot.state is FishingState.WAIT_RESULT
-
-
-def test_single_sixth_frame_candidate_then_interruption_is_progress_loss() -> None:
-    core, _input_service, _state_machine = make_core(
-        state=FishingState.CONTROL
-    )
-    for index in range(5):
-        core.process(SceneObservation(), None, index / 30, CLIENT)
-
-    core.process(
-        SceneObservation(result_candidate=True),
-        None,
-        5 / 30,
-        CLIENT,
-    )
-    assert core.snapshot.state is FishingState.CONTROL
-
-    core.process(SceneObservation(), None, 6 / 30, CLIENT)
-
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_PROGRESS_LOST"
 
@@ -1159,16 +1096,15 @@ def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
         try:
             wait_until(
                 lambda: core.snapshot.state is FishingState.COMPLETE,
-                timeout=2.0,
+                timeout=4.0,
             )
         except AssertionError as error:
             raise AssertionError(
                 f"snapshot={core.snapshot!r}, events={input_service.events!r}, "
                 f"remaining={len(recognizer.observations)}, "
-                f"attempts={core.result_click_attempts}, "
                 f"next_click={core.result_next_click_at!r}"
             ) from error
-        wait_until(lambda: engine.is_running is False, timeout=2.0)
+        wait_until(lambda: engine.is_running is False, timeout=4.0)
         completed_event_count = len(input_service.events)
         time.sleep(0.02)
 
@@ -1213,7 +1149,7 @@ def test_complete_publish_racing_shutdown_preserves_terminal_state(
 
     engine.subscribe(subscriber)
     engine.start(1)
-    assert complete_publish_entered.wait(timeout=2.0)
+    assert complete_publish_entered.wait(timeout=4.0)
     releases_before_shutdown = input_service.events.count("release")
     shutdown_thread = threading.Thread(target=engine.shutdown)
     shutdown_thread.start()
@@ -1246,7 +1182,7 @@ def test_pause_and_f8_after_worker_exit_preserve_complete(tmp_path) -> None:
 
     engine.start(1)
     try:
-        wait_until(lambda: engine.is_running is False, timeout=2.0)
+        wait_until(lambda: engine.is_running is False, timeout=4.0)
         releases_before_pause = input_service.events.count("release")
 
         engine.pause("按钮暂停")
@@ -1375,7 +1311,7 @@ def test_pause_serializes_with_inflight_process_and_finishes_with_release() -> N
     assert input_service.events == ["F", "release"]
 
 
-def test_core_timeout_and_resume_classify_current_scene() -> None:
+def test_core_timeout_resume_rejects_result_scene_and_accepts_ready() -> None:
     core, _input_service, state_machine = make_core()
     core.start(1, 0.0)
     core.process(SceneObservation(), None, 3.1, CLIENT)
@@ -1383,11 +1319,10 @@ def test_core_timeout_and_resume_classify_current_scene() -> None:
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_TIMEOUT"
 
-    assert core.resume(SceneObservation(result=True), 4.0) is True
-    assert state_machine.state is FishingState.WAIT_RESULT
-    core.pause("用户暂停", 4.1)
-    assert core.resume(SceneObservation(), 4.2) is False
+    assert core.resume(SceneObservation(result=True), 4.0) is False
     assert state_machine.state is FishingState.PAUSED
+    assert core.resume(SceneObservation(ready=True), 4.1) is True
+    assert state_machine.state is FishingState.READY
 
 
 @pytest.mark.parametrize(
@@ -1686,7 +1621,7 @@ def test_output_restart_failure_is_capture_error(tmp_path) -> None:
     assert core.pause_code == "E_CAPTURE"
 
 
-def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> None:
+def test_engine_resume_does_not_use_result_recognition(tmp_path) -> None:
     recognizer = ScriptedRecognizer([SceneObservation()])
     engine, core, input_service, _window, _source = make_engine(
         tmp_path, recognizer=recognizer
@@ -1698,18 +1633,9 @@ def test_engine_resume_reclassifies_result_before_allowing_click(tmp_path) -> No
         [SceneObservation(result=True), SceneObservation(result=True)]
     )
     engine.resume()
-    try:
-        wait_until(lambda: core.snapshot.state is FishingState.DISMISS_RESULT)
-    except AssertionError as error:
-        raise AssertionError(
-            f"snapshot={core.snapshot!r}, events={input_service.events!r}, "
-            f"remaining={recognizer.observations!r}, "
-            f"resume_request={engine._resume_request!r}, "
-            f"pause_epoch={engine._pause_epoch}, "
-            f"running={engine.is_running}"
-        ) from error
+    time.sleep(0.1)
 
-    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    assert core.snapshot.state is FishingState.PAUSED
     assert not any(isinstance(event, tuple) for event in input_service.events)
     engine.shutdown()
 
@@ -1953,8 +1879,8 @@ def test_resume_does_not_consume_observation_captured_before_request(tmp_path) -
     recognizer = CapturedBarrierRecognizer(
         [
             SceneObservation(),
-            SceneObservation(result=True),
-            SceneObservation(result=True),
+            SceneObservation(ready=True),
+            SceneObservation(ready=True),
         ]
     )
     engine, core, _input, _window, _source = make_engine(
@@ -1966,9 +1892,9 @@ def test_resume_does_not_consume_observation_captured_before_request(tmp_path) -
     engine.pause("pause during recognition")
     engine.resume()
     recognizer.allow.set()
-    wait_until(lambda: core.snapshot.state is FishingState.DISMISS_RESULT)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
 
-    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    assert core.snapshot.state is FishingState.WAIT_BITE
     engine.shutdown()
 
 
@@ -2041,7 +1967,7 @@ def test_resume_aba_does_not_let_request_a_consume_request_b(tmp_path) -> None:
 
     recognizer.allow_b.set()
     assert recognizer.b_returned.wait(timeout=1)
-    wait_until(lambda: core.snapshot.state is FishingState.WAIT_RESULT)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
     engine.shutdown()
 
 

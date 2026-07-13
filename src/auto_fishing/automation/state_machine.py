@@ -10,7 +10,6 @@ class Event(Enum):
     REEL_SENT = auto()
     BAR_DETECTED = auto()
     BAR_GONE = auto()
-    RESULT_DETECTED = auto()
     RESULT_CLICKED = auto()
     INTERVAL_ELAPSED = auto()
     RESUME_CONTROL = auto()
@@ -23,7 +22,6 @@ TRANSITIONS = {
     (FishingState.WAIT_BITE, Event.REEL_SENT): FishingState.WAIT_BAR,
     (FishingState.WAIT_BAR, Event.BAR_DETECTED): FishingState.CONTROL,
     (FishingState.CONTROL, Event.BAR_GONE): FishingState.WAIT_RESULT,
-    (FishingState.WAIT_RESULT, Event.RESULT_DETECTED): FishingState.DISMISS_RESULT,
     (FishingState.INTER_ROUND, Event.INTERVAL_ELAPSED): FishingState.READY,
     (FishingState.PAUSED, Event.RESUME_CONTROL): FishingState.CONTROL,
     (FishingState.PAUSED, Event.RESUME_RESULT): FishingState.WAIT_RESULT,
@@ -36,7 +34,6 @@ TIMEOUTS = {
     FishingState.WAIT_BAR: 8.0,
     FishingState.CONTROL: 120.0,
     FishingState.WAIT_RESULT: 10.0,
-    FishingState.DISMISS_RESULT: 8.0,
     FishingState.INTER_ROUND: 1.0,
 }
 
@@ -71,7 +68,7 @@ class FishingStateMachine:
 
     def handle(self, event: Event, now: float) -> None:
         if (
-            self.state is FishingState.DISMISS_RESULT
+            self.state is FishingState.WAIT_RESULT
             and event is Event.RESULT_CLICKED
         ):
             self.completed += 1

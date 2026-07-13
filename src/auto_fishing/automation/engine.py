@@ -28,6 +28,10 @@ from auto_fishing.vision.geometry import crop_normalized
 from auto_fishing.vision.regions import TOP_ROI
 
 
+_RESULT_CLICK_DELAY_MIN = 2.10
+_RESULT_CLICK_DELAY_MAX = 2.60
+
+
 class InputActionError(RuntimeError):
     """An input boundary failed while applying a core decision."""
 
@@ -69,8 +73,6 @@ class AutomationCore:
         self.event_recorder = event_recorder
         self.bar_missing_frames = 0
         self.bar_valid_frames = 0
-        self.result_candidate_frames = 0
-        self.result_click_attempts = 0
         self.result_next_click_at: float | None = None
         self.pause_code = ""
         self._error = ""
@@ -94,7 +96,6 @@ class AutomationCore:
             self.state_machine.start(target, now)
             self.bar_missing_frames = 0
             self.bar_valid_frames = 0
-            self.result_candidate_frames = 0
             self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
@@ -154,10 +155,10 @@ class AutomationCore:
             if self.state_machine.state is not FishingState.PAUSED:
                 return False
             event = None
-            if observation.progress is not None:
-                event = Event.RESUME_CONTROL
-            elif observation.result:
+            if self.state_machine.paused_from is FishingState.WAIT_RESULT:
                 event = Event.RESUME_RESULT
+            elif observation.progress is not None:
+                event = Event.RESUME_CONTROL
             elif observation.ready:
                 event = Event.RESUME_READY
             if event is None:
@@ -166,8 +167,13 @@ class AutomationCore:
             self.state_machine.handle(event, now)
             self.bar_missing_frames = 0
             self.bar_valid_frames = 0
-            self.result_candidate_frames = 0
             self._reset_result_dismissal()
+            if self.state_machine.state is FishingState.WAIT_RESULT:
+                self._schedule_result_click(
+                    now,
+                    _RESULT_CLICK_DELAY_MIN,
+                    _RESULT_CLICK_DELAY_MAX,
+                )
             self.pause_code = ""
             self._error = ""
             self._input_blocked.clear()
@@ -183,7 +189,6 @@ class AutomationCore:
             self.state_machine.cancel_current(now)
             self.bar_missing_frames = 0
             self.bar_valid_frames = 0
-            self.result_candidate_frames = 0
             self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
@@ -248,13 +253,8 @@ class AutomationCore:
             self.state_machine.handle(Event.BAR_DETECTED, now)
         elif state is FishingState.CONTROL:
             self._control(observation, now)
-        elif state is FishingState.WAIT_RESULT and observation.result:
-            self._input(self.input_service.release_all)
-            self.state_machine.handle(Event.RESULT_DETECTED, now)
-            self._reset_result_dismissal()
-            self._schedule_result_click(now, 0.18, 0.42)
-        elif state is FishingState.DISMISS_RESULT:
-            self._dismiss_result(observation, now, client_rect)
+        elif state is FishingState.WAIT_RESULT:
+            self._click_result_after_delay(now, client_rect)
         elif (
             state is FishingState.INTER_ROUND
             and self.state_machine.check_interval(now)
@@ -276,23 +276,12 @@ class AutomationCore:
         if observation.progress is not None:
             self.bar_missing_frames = 0
             self.bar_valid_frames += 1
-            self.result_candidate_frames = 0
             direction = self.controller.decide(observation.progress)
             self._input(lambda: self.input_service.set_direction(direction))
             return
 
         self.bar_missing_frames += 1
-        self.result_candidate_frames = (
-            self.result_candidate_frames + 1
-            if observation.result_candidate
-            else 0
-        )
         self._input(self.input_service.release_all)
-        if observation.result_candidate:
-            if self.result_candidate_frames >= 2:
-                self.bar_valid_frames = 0
-                self.state_machine.handle(Event.BAR_GONE, now)
-            return
         clean_disappearance = (
             observation.progress_scanlines == 0
             and observation.progress_candidates == 0
@@ -304,7 +293,7 @@ class AutomationCore:
             and clean_disappearance
         ):
             self.bar_valid_frames = 0
-            self.state_machine.handle(Event.BAR_GONE, now)
+            self._enter_wait_result(now)
             return
         if self.bar_missing_frames >= 6:
             self.pause(
@@ -313,19 +302,28 @@ class AutomationCore:
                 code="E_PROGRESS_LOST",
             )
 
-    def _dismiss_result(
+    def _enter_wait_result(self, now: float) -> None:
+        self.state_machine.handle(Event.BAR_GONE, now)
+        self._reset_result_dismissal()
+        self._schedule_result_click(
+            now,
+            _RESULT_CLICK_DELAY_MIN,
+            _RESULT_CLICK_DELAY_MAX,
+        )
+
+    def _click_result_after_delay(
         self,
-        observation: SceneObservation,
         now: float,
         client_rect: Rect | None,
     ) -> None:
         if self.result_next_click_at is None:
-            if observation.result:
-                self._schedule_result_click(now, 0.18, 0.42)
+            self._schedule_result_click(
+                now,
+                _RESULT_CLICK_DELAY_MIN,
+                _RESULT_CLICK_DELAY_MAX,
+            )
             return
         if now < self.result_next_click_at:
-            return
-        if not observation.result:
             return
         if client_rect is None:
             return
@@ -339,19 +337,17 @@ class AutomationCore:
             )
             return
         x, y = point
-        attempt = self.result_click_attempts + 1
         self._record(
             "result.dismiss_attempt",
-            attempt=attempt,
+            attempt=1,
             x=x,
             y=y,
-            result=observation.result,
+            trigger="timer_elapsed",
         )
         self._input(lambda: self.input_service.click(x, y))
-        self.result_click_attempts = attempt
         self._record(
             "result.dismiss_confirmed",
-            attempts=attempt,
+            attempts=1,
             signal="click_succeeded",
         )
         self.state_machine.handle(Event.RESULT_CLICKED, now)
@@ -370,7 +366,7 @@ class AutomationCore:
         self.result_next_click_at = now + delay
         self._record(
             "result.dismiss_scheduled",
-            attempt=min(self.result_click_attempts + 1, 3),
+            attempt=1,
             delay=delay,
             scheduled_at=self.result_next_click_at,
         )
@@ -392,7 +388,6 @@ class AutomationCore:
         return None
 
     def _reset_result_dismissal(self) -> None:
-        self.result_click_attempts = 0
         self.result_next_click_at = None
 
     def _record(self, name: str, **fields: object) -> None:
