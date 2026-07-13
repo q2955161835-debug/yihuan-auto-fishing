@@ -77,7 +77,7 @@ def test_real_high_quality_fixture_detects_narrow_green_interval() -> None:
 
 增加按 `image_width`（图像宽度）缩放的合成帧辅助函数，并在 300、600、1200 像素宽度下验证：绿区宽度约为画面 9%，黄标宽度约为画面 1%，黄标位于中央或靠近两端时，识别结果均非空且绿区包含黄标。
 
-- [ ] **步骤 2：保留短噪声拒绝测试**
+- [ ] **步骤 2：保留短噪声拒绝并验证诊断原因**
 
 运行现有测试：
 
@@ -85,7 +85,7 @@ def test_real_high_quality_fixture_detects_narrow_green_interval() -> None:
 & 'C:\Users\29551\AppData\Local\Programs\Python\Python313\python.exe' -m pytest try/tests/test_progress.py::test_rejects_green_region_that_is_too_narrow -q
 ```
 
-预期：通过；26 像素绿区短于 7 像素黄标宽度的四倍，因此仍被拒绝。
+把现有测试改为调用 `analyze`，同时断言观测为空且 `rejection_reason == "bar_too_narrow"`。预期：通过；26 像素绿区短于 7 像素黄标宽度的四倍，因此仍被拒绝，并能与完全没有配对结构的 `no_consensus` 区分。
 
 - [ ] **步骤 3：确认新增合成测试在实现前失败**
 
@@ -116,7 +116,7 @@ yellow_width = yellow_right - yellow_left
 minimum_width = max(image_width * 0.02, yellow_width * 4)
 ```
 
-左右绿色段合并候选与单一绿色区间候选都使用该 `minimum_width`，并把它写入 `_LineCandidate`。
+左右绿色段合并候选与单一绿色区间候选都把该 `minimum_width` 写入 `_LineCandidate`。只要黄色与绿色的邻接或包含关系成立，就保留结构候选参与多行共识；不要在单行阶段按宽度丢弃，否则无法在共识后报告 `bar_too_narrow`。
 
 - [ ] **步骤 2：让共识结果携带门槛中位数**
 
