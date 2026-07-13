@@ -896,6 +896,57 @@ def test_result_disappearance_prevents_retry_and_ready_counts_once() -> None:
     assert core.snapshot.completed == 1
 
 
+def test_three_result_absent_frames_confirm_closed_without_ready_icon() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, state_machine = make_core(
+        random_uniform=lambda low, _high: low,
+        event_recorder=runtime_log,
+    )
+    enter_dismiss_result(core, state_machine)
+    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+
+    core.process(SceneObservation(), None, 1.20, CLIENT)
+    core.process(SceneObservation(), None, 1.21, CLIENT)
+
+    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    assert core.snapshot.completed == 0
+
+    core.process(SceneObservation(), None, 1.22, CLIENT)
+
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
+    assert [
+        event for event in input_service.events if isinstance(event, tuple)
+    ] == [("click", 1024, 396)]
+    assert {
+        "event": "result.dismiss_confirmed",
+        "attempts": 1,
+        "absent_frames": 3,
+    } in runtime_log.events
+
+
+def test_result_reappearance_resets_absent_frame_confirmation() -> None:
+    core, _input_service, state_machine = make_core(
+        random_uniform=lambda low, _high: low,
+    )
+    enter_dismiss_result(core, state_machine)
+    core.process(SceneObservation(result=True), None, 1.18, CLIENT)
+
+    core.process(SceneObservation(), None, 1.20, CLIENT)
+    core.process(SceneObservation(), None, 1.21, CLIENT)
+    core.process(SceneObservation(result=True), None, 1.22, CLIENT)
+    core.process(SceneObservation(), None, 1.23, CLIENT)
+    core.process(SceneObservation(), None, 1.24, CLIENT)
+
+    assert core.snapshot.state is FishingState.DISMISS_RESULT
+    assert core.snapshot.completed == 0
+
+    core.process(SceneObservation(), None, 1.25, CLIENT)
+
+    assert core.snapshot.state is FishingState.COMPLETE
+    assert core.snapshot.completed == 1
+
+
 def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:
     core, input_service, state_machine = make_core(
         random_uniform=lambda low, _high: low,
