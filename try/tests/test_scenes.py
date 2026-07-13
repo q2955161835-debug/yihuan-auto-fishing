@@ -10,6 +10,7 @@ from auto_fishing.vision.scenes import BiteDetector, SceneRecognizer
 BLUE_BGR = (255, 100, 0)
 GREEN_BGR = (200, 255, 0)
 YELLOW_BGR = (0, 230, 255)
+RESULT_FIXTURE_OCCLUSION = Rect(0, 173, 320, 270)
 
 
 def bite_prompt_frame() -> np.ndarray:
@@ -21,6 +22,27 @@ def bite_prompt_frame() -> np.ndarray:
 
 def result_frame(width: int = 1280, height: int = 720, *, ready_icon: bool = False) -> np.ndarray:
     image = np.full((height, width, 3), 25, dtype=np.uint8)
+    cv2.rectangle(
+        image,
+        (round(width * 0.38), round(height * 0.04)),
+        (round(width * 0.62), round(height * 0.13)),
+        (35, 35, 35),
+        -1,
+    )
+    cv2.rectangle(
+        image,
+        (round(width * 0.43), round(height * 0.07)),
+        (round(width * 0.57), round(height * 0.10)),
+        (180, 30, 220),
+        -1,
+    )
+    cv2.rectangle(
+        image,
+        (round(width * 0.395), round(height * 0.06)),
+        (round(width * 0.415), round(height * 0.08)),
+        (255, 255, 255),
+        -1,
+    )
     radius = max(12, round(min(width, height) * 0.20))
     cv2.circle(
         image,
@@ -121,6 +143,11 @@ def real_result_reference() -> np.ndarray:
     return cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
 
 
+def result_fixture(name: str) -> np.ndarray:
+    path = Path(__file__).resolve().parents[1] / "fixtures" / "result" / name
+    return cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
 def test_bite_prompt_requires_two_consecutive_frames_after_cast_cooldown() -> None:
     base = np.zeros((100, 100, 3), dtype=np.uint8)
     detector = BiteDetector()
@@ -200,6 +227,49 @@ def test_result_requires_three_consecutive_frames() -> None:
     assert observation.result_candidate is True
     assert observation.result is True
     assert observation.progress is None
+
+
+def test_real_transition_vortex_never_confirms_result() -> None:
+    recognizer = SceneRecognizer()
+    frame = result_fixture("result_transition_vortex.jpg")
+
+    for index in range(3):
+        observation = recognizer.observe(
+            frame,
+            1.0 + index / 30,
+            occlusion=RESULT_FIXTURE_OCCLUSION,
+        )
+
+        assert observation.result_candidate is False
+        assert observation.result is False
+
+
+def test_real_catch_card_confirms_after_three_frames() -> None:
+    recognizer = SceneRecognizer()
+    frame = result_fixture("result_catch_card.jpg")
+
+    first = recognizer.observe(
+        frame,
+        1.0,
+        occlusion=RESULT_FIXTURE_OCCLUSION,
+    )
+    second = recognizer.observe(
+        frame,
+        1.1,
+        occlusion=RESULT_FIXTURE_OCCLUSION,
+    )
+    third = recognizer.observe(
+        frame,
+        1.2,
+        occlusion=RESULT_FIXTURE_OCCLUSION,
+    )
+
+    assert first.result_candidate is True
+    assert first.result is False
+    assert second.result_candidate is True
+    assert second.result is False
+    assert third.result_candidate is True
+    assert third.result is True
 
 
 def test_reel_prompt_requires_two_consecutive_frames() -> None:

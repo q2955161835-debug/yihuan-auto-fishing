@@ -11,6 +11,7 @@ from auto_fishing.vision.regions import (
     READY_ROI,
     REEL_PROMPT_ROI,
     RESULT_CENTER_ROI,
+    RESULT_HEADER_ROI,
     RESULT_ROI,
     TOP_ROI,
 )
@@ -80,22 +81,37 @@ class SceneRecognizer:
         reel_prompt_roi = crop_normalized(client_frame, REEL_PROMPT_ROI)
         ready_roi = crop_normalized(client_frame, READY_ROI)
         result_center = crop_normalized(client_frame, RESULT_CENTER_ROI)
+        result_header = crop_normalized(client_frame, RESULT_HEADER_ROI)
         result_valid = _valid_mask(
             client_frame,
             result_center,
             RESULT_CENTER_ROI,
             occlusion,
         )
+        result_header_valid = _valid_mask(
+            client_frame,
+            result_header,
+            RESULT_HEADER_ROI,
+            occlusion,
+        )
 
         progress_result = self.progress_recognizer.analyze(top, timestamp)
         progress = progress_result.observation
         bite = self.bite_detector.detect(bite_roi)
-        result_candidate = (
+        result_center_candidate = (
             progress is None
             and _blue_ratio(result_center, result_valid) > 0.40
             and _white_ratio(result_center, result_valid) > 0.05
             and _dark_ratio(result_center, result_valid) < 0.60
         )
+        result_header_candidate = (
+            _magenta_ratio(result_header, result_header_valid) > 0.08
+            and _white_ratio(result_header, result_header_valid) > 0.008
+            and 0.30
+            <= _dark_ratio(result_header, result_header_valid)
+            <= 0.80
+        )
+        result_candidate = result_center_candidate and result_header_candidate
         reel_prompt_candidate = (
             _white_ratio(reel_prompt_roi) > 0.02
             and _dark_ratio(reel_prompt_roi) > 0.60
@@ -149,6 +165,15 @@ def _white_ratio(
 ) -> float:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, (0, 0, 190), (179, 80, 255)) > 0
+    return _masked_mean(mask, valid)
+
+
+def _magenta_ratio(
+    image: np.ndarray,
+    valid: np.ndarray | None = None,
+) -> float:
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (135, 80, 80), (175, 255, 255)) > 0
     return _masked_mean(mask, valid)
 
 
