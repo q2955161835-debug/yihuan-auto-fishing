@@ -313,7 +313,7 @@ class MainWindow:
         try:
             if self._state is FishingState.PAUSED:
                 self._countdown_active = True
-                self.error_var.set("无")
+                self.error_var.set("正在放弃当前轮并开始新一轮")
                 self._refresh_control_states()
                 if self.auto_activate_var.get():
                     self.controller.resume(activate=True)
@@ -338,7 +338,7 @@ class MainWindow:
     def _on_resume_done(self, error: str | None) -> None:
         self._countdown_active = False
         self.state_var.set(self._state.value)
-        self.error_var.set(error or "无")
+        self.error_var.set(error or "已放弃当前轮，开始新一轮")
         self._refresh_control_states()
 
     def block_start(self, reason: str) -> None:

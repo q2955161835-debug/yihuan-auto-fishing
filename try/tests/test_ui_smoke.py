@@ -270,6 +270,7 @@ def test_start_and_resume_use_explicit_activation_when_enabled(root) -> None:
     window.apply_snapshot(RuntimeSnapshot(FishingState.PAUSED, 0, 1, 30.0))
     window.on_pause_or_resume()
     assert controller.calls[-1] == ("resume", True)
+    assert window.error_var.get() == "已放弃当前轮，开始新一轮"
 
 
 def test_start_and_resume_keep_manual_countdown_when_activation_disabled(
@@ -332,6 +333,7 @@ def test_snapshot_is_queued_on_tk_thread_and_locks_runtime_controls(root) -> Non
         assert window.error_var.get() == "请在倒计时结束前切回已绑定的游戏窗口"
         assert window.pause_button.instate(["disabled"])
         on_done(None)
+        assert window.error_var.get() == "已放弃当前轮，开始新一轮"
         window.apply_snapshot(
             RuntimeSnapshot(FishingState.READY, 0, 7, 30.0)
         )
