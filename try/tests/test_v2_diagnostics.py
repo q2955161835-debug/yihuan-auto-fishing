@@ -9,11 +9,16 @@ from zipfile import ZipFile
 import cv2
 import numpy as np
 
+import auto_fishing.storage.memory_diagnostics as memory_diagnostics
 from auto_fishing.model import (
     FishingState,
+    Rect,
     RuntimeSnapshot,
     SceneObservation,
 )
+from auto_fishing.vision.geometry import crop_normalized
+from auto_fishing.vision.progress import ProgressRecognizer
+from auto_fishing.vision.regions import TOP_ROI
 from auto_fishing.storage.memory_diagnostics import MemoryDiagnosticRecorder
 from auto_fishing.storage.diagnostic_bundles import (
     DiagnosticBundleService,
@@ -21,7 +26,7 @@ from auto_fishing.storage.diagnostic_bundles import (
 )
 
 
-def test_memory_recorder_samples_ten_fps_for_the_latest_ten_seconds(
+def test_memory_recorder_samples_ten_fps_for_the_latest_thirty_seconds(
     tmp_path,
 ) -> None:
     clock = [0.0]
@@ -31,7 +36,7 @@ def test_memory_recorder_samples_ten_fps_for_the_latest_ten_seconds(
     )
     recorder.start()
 
-    for index in range(121):
+    for index in range(321):
         clock[0] = index / 10
         recorder.event("tick", index=index)
         recorder.record_frame(
@@ -44,7 +49,7 @@ def test_memory_recorder_samples_ten_fps_for_the_latest_ten_seconds(
         )
 
     snapshot = recorder.snapshot()
-    assert len(snapshot.frames) == 101
+    assert len(snapshot.frames) == 301
     assert snapshot.frames[0].monotonic >= 2.0
     decoded = cv2.imdecode(
         np.frombuffer(snapshot.frames[-1].jpeg, dtype=np.uint8),
@@ -55,26 +60,123 @@ def test_memory_recorder_samples_ten_fps_for_the_latest_ten_seconds(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_memory_recorder_keeps_twenty_seconds_of_events() -> None:
+def test_memory_recorder_keeps_thirty_seconds_of_events_with_sequence() -> None:
     clock = [0.0]
     recorder = MemoryDiagnosticRecorder(clock=lambda: clock[0])
     recorder.event("progress.control", direction="left")
 
-    clock[0] = 15.0
+    clock[0] = 25.0
     recorder.event("manual.report")
 
     assert [event["event"] for event in recorder.snapshot().events] == [
         "progress.control",
         "manual.report",
     ]
+    assert [event["sequence"] for event in recorder.snapshot().events] == [1, 2]
 
-    clock[0] = 21.0
+    clock[0] = 30.001
     recorder.event("later.event")
 
     assert [event["event"] for event in recorder.snapshot().events] == [
         "manual.report",
         "later.event",
     ]
+    assert [event["sequence"] for event in recorder.snapshot().events] == [2, 3]
+
+
+def test_progress_band_is_lossless_native_width_and_sampled_at_ten_fps() -> None:
+    clock = [0.0]
+    recorder = MemoryDiagnosticRecorder(clock=lambda: clock[0])
+    source = np.zeros((720, 1280, 3), dtype=np.uint8)
+    top_rect = TOP_ROI.to_pixels(Rect(0, 0, 1280, 720))
+    source[top_rect.top : top_rect.bottom, top_rect.left : top_rect.right] = (
+        17,
+        123,
+        231,
+    )
+    diagnostics = ProgressRecognizer().analyze(
+        np.zeros((120, 300, 3), dtype=np.uint8),
+        0.0,
+    ).diagnostics
+    observation = SceneObservation(progress_diagnostics=diagnostics)
+
+    for index in range(31):
+        clock[0] = index / 30
+        recorder.record_frame(
+            source,
+            observation=observation,
+            state_before=FishingState.CONTROL,
+            snapshot=RuntimeSnapshot(FishingState.CONTROL, 0, 1, 30.0),
+            frame_timestamp=clock[0],
+            now_monotonic=clock[0],
+        )
+
+    snapshot = recorder.snapshot()
+    assert 10 <= len(snapshot.progress_frames) <= 11
+    assert len(snapshot.progress_traces) == 31
+    decoded = cv2.imdecode(
+        np.frombuffer(snapshot.progress_frames[-1].png, dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    top = crop_normalized(source, TOP_ROI)
+    expected = top[round(top.shape[0] * 0.40) : round(top.shape[0] * 0.52)]
+    assert decoded is not None
+    assert decoded.shape == expected.shape
+    assert np.array_equal(decoded, expected)
+    assert snapshot.progress_traces[-1]["frame_index"] == 31
+    assert snapshot.progress_traces[-1]["progress"]["image_width"] == 300
+
+
+def test_progress_png_encoding_failure_is_counted_without_escaping(
+    monkeypatch,
+) -> None:
+    recorder = MemoryDiagnosticRecorder(clock=lambda: 1.0)
+    diagnostics = ProgressRecognizer().analyze(
+        np.zeros((120, 300, 3), dtype=np.uint8),
+        1.0,
+    ).diagnostics
+
+    def fail_encode(_image, *, compression=3):
+        raise OSError("PNG 编码失败")
+
+    monkeypatch.setattr(memory_diagnostics, "encode_png", fail_encode)
+
+    frame_index = recorder.record_frame(
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        observation=SceneObservation(progress_diagnostics=diagnostics),
+        state_before=FishingState.CONTROL,
+        snapshot=RuntimeSnapshot(FishingState.CONTROL, 0, 1, 30.0),
+        frame_timestamp=1.0,
+        now_monotonic=1.0,
+    )
+
+    snapshot = recorder.snapshot()
+    assert frame_index == 1
+    assert len(snapshot.events) == 1
+    assert len(snapshot.progress_traces) == 1
+    assert snapshot.progress_frames == ()
+    assert snapshot.drop_counts["progress_frames"] == 1
+
+
+def test_progress_trace_snapshot_is_deeply_frozen() -> None:
+    recorder = MemoryDiagnosticRecorder(clock=lambda: 1.0)
+    diagnostics = ProgressRecognizer().analyze(
+        np.zeros((120, 300, 3), dtype=np.uint8),
+        1.0,
+    ).diagnostics
+    recorder.record_frame(
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        observation=SceneObservation(progress_diagnostics=diagnostics),
+        state_before=FishingState.CONTROL,
+        snapshot=RuntimeSnapshot(FishingState.CONTROL, 0, 1, 30.0),
+        frame_timestamp=1.0,
+        now_monotonic=1.0,
+    )
+
+    first = recorder.snapshot()
+    first.progress_traces[0]["progress"]["image_width"] = 999
+
+    assert recorder.snapshot().progress_traces[0]["progress"]["image_width"] == 300
 
 
 def _populated_recorder() -> MemoryDiagnosticRecorder:
