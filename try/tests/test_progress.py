@@ -432,3 +432,44 @@ def test_missing_frame_does_not_reuse_last_observation() -> None:
         )
         is None
     )
+
+
+def test_analyze_exposes_scan_runs_and_selection_without_changing_result() -> None:
+    recognizer = ProgressRecognizer()
+
+    result = recognizer.analyze(
+        frame(green=(70, 170), yellow=120),
+        1.0,
+    )
+
+    assert result.observation is not None
+    diagnostics = result.diagnostics
+    assert diagnostics.image_width == 300
+    assert diagnostics.image_height == 120
+    assert len(diagnostics.scan_rows) == 5
+    assert diagnostics.selected_yellow is not None
+    assert len(diagnostics.yellow_runs) >= 1
+    assert len(diagnostics.green_runs_by_line) == 5
+    assert len(diagnostics.candidate_counts_by_line) == 5
+    assert diagnostics.selected_green is not None
+    assert diagnostics.agreeing_scanlines == result.valid_scanlines
+    assert diagnostics.truncated is False
+    assert result.observation.green_left == pytest.approx(
+        diagnostics.selected_green[0] / diagnostics.image_width
+    )
+    assert result.observation.green_right == pytest.approx(
+        diagnostics.selected_green[1] / diagnostics.image_width
+    )
+
+
+def test_yellow_missing_still_records_green_scan_runs() -> None:
+    image = np.zeros((120, 300, 3), dtype=np.uint8)
+    cv2.rectangle(image, (70, 40), (170, 70), GREEN_BGR, -1)
+
+    result = ProgressRecognizer().analyze(image, 1.0)
+
+    assert result.observation is None
+    assert result.rejection_reason == "yellow_missing"
+    assert result.diagnostics.yellow_runs == ()
+    assert result.diagnostics.selected_yellow is None
+    assert any(result.diagnostics.green_runs_by_line)

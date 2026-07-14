@@ -6,7 +6,11 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from auto_fishing.model import Direction, ProgressObservation
+from auto_fishing.model import (
+    Direction,
+    ProgressObservation,
+    ProgressScanDiagnostics,
+)
 
 
 _SCAN_FRACTIONS = (0.40, 0.43, 0.46, 0.49, 0.52)
@@ -16,6 +20,7 @@ _YELLOW_MIN_VERTICAL_COVERAGE = 0.35
 _CONTROL_HISTORY_LIMIT = 15
 _CONTROL_RECENCY_DECAY = 0.20
 _CONTROL_MAX_FRAME_GAP_SECONDS = 0.20
+_DIAGNOSTIC_RUN_LIMIT = 128
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ class ProgressScanResult:
     valid_scanlines: int = 0
     candidate_count: int = 0
     rejection_reason: str = ""
+    diagnostics: ProgressScanDiagnostics | None = None
 
 
 class ProgressRecognizer:
@@ -101,22 +107,35 @@ class ProgressRecognizer:
             for run in yellow_runs
             if run[1] - run[0] <= max(16, image_width * 0.04)
         ]
+        green_runs_by_line = [
+            _runs(green_mask[row] > 0, 0)
+            for row in rows
+        ]
+        reference = self._history[-1] if self._history else None
         if not yellow_runs:
             return ProgressScanResult(
                 observation=None,
                 rejection_reason="yellow_missing",
+                diagnostics=_progress_diagnostics(
+                    image_width=image_width,
+                    image_height=image_height,
+                    rows=rows,
+                    yellow_runs=yellow_runs,
+                    selected_yellow=None,
+                    green_runs_by_line=green_runs_by_line,
+                    candidates_by_line=None,
+                    reference=reference,
+                    selected=None,
+                    agreeing_scanlines=0,
+                    rejection_reason="yellow_missing",
+                ),
             )
 
-        reference = self._history[-1] if self._history else None
         selected_yellow = _select_yellow_run(
             yellow_runs,
             image_width,
             reference,
         )
-        green_runs_by_line = [
-            _runs(green_mask[row] > 0, 0)
-            for row in rows
-        ]
         candidates_by_line = [
             (
                 _line_candidates(
@@ -145,6 +164,19 @@ class ProgressRecognizer:
                 valid_scanlines=valid_scanlines,
                 candidate_count=candidate_count,
                 rejection_reason="no_consensus",
+                diagnostics=_progress_diagnostics(
+                    image_width=image_width,
+                    image_height=image_height,
+                    rows=rows,
+                    yellow_runs=yellow_runs,
+                    selected_yellow=selected_yellow,
+                    green_runs_by_line=green_runs_by_line,
+                    candidates_by_line=candidates_by_line,
+                    reference=reference,
+                    selected=None,
+                    agreeing_scanlines=0,
+                    rejection_reason="no_consensus",
+                ),
             )
         candidate, agreeing_scanlines = consensus
         green_width = candidate.green_right - candidate.green_left
@@ -154,6 +186,19 @@ class ProgressRecognizer:
                 valid_scanlines=valid_scanlines,
                 candidate_count=candidate_count,
                 rejection_reason="bar_too_narrow",
+                diagnostics=_progress_diagnostics(
+                    image_width=image_width,
+                    image_height=image_height,
+                    rows=rows,
+                    yellow_runs=yellow_runs,
+                    selected_yellow=selected_yellow,
+                    green_runs_by_line=green_runs_by_line,
+                    candidates_by_line=candidates_by_line,
+                    reference=reference,
+                    selected=candidate,
+                    agreeing_scanlines=agreeing_scanlines,
+                    rejection_reason="bar_too_narrow",
+                ),
             )
 
         agreement = agreeing_scanlines / len(_SCAN_FRACTIONS)
@@ -172,6 +217,19 @@ class ProgressRecognizer:
             ),
             valid_scanlines=agreeing_scanlines,
             candidate_count=candidate_count,
+            diagnostics=_progress_diagnostics(
+                image_width=image_width,
+                image_height=image_height,
+                rows=rows,
+                yellow_runs=yellow_runs,
+                selected_yellow=selected_yellow,
+                green_runs_by_line=green_runs_by_line,
+                candidates_by_line=candidates_by_line,
+                reference=reference,
+                selected=candidate,
+                agreeing_scanlines=agreeing_scanlines,
+                rejection_reason="",
+            ),
         )
 
 
@@ -245,6 +303,75 @@ def _runs(mask_row: np.ndarray, offset: int) -> list[tuple[int, int]]:
         (int(left + offset), int(right + offset))
         for left, right in zip(starts, ends)
     ]
+
+
+def _progress_diagnostics(
+    *,
+    image_width: int,
+    image_height: int,
+    rows: list[int],
+    yellow_runs: list[tuple[int, int]],
+    selected_yellow: tuple[int, int] | None,
+    green_runs_by_line: list[list[tuple[int, int]]],
+    candidates_by_line: list[list[_LineCandidate]] | None,
+    reference: ProgressObservation | None,
+    selected: _LineCandidate | None,
+    agreeing_scanlines: int,
+    rejection_reason: str,
+) -> ProgressScanDiagnostics:
+    bounded_yellow, yellow_truncated = _bounded_runs(
+        yellow_runs,
+        selected=selected_yellow,
+    )
+    bounded_green: list[tuple[tuple[int, int], ...]] = []
+    green_truncated = False
+    for runs in green_runs_by_line:
+        bounded, truncated = _bounded_runs(runs)
+        bounded_green.append(bounded)
+        green_truncated = green_truncated or truncated
+    return ProgressScanDiagnostics(
+        image_width=image_width,
+        image_height=image_height,
+        scan_rows=tuple(rows),
+        minimum_green_width=_minimum_green_width(image_width),
+        yellow_runs=bounded_yellow,
+        selected_yellow=selected_yellow,
+        green_runs_by_line=tuple(bounded_green),
+        candidate_counts_by_line=tuple(
+            len(candidates)
+            for candidates in (candidates_by_line or [[] for _ in rows])
+        ),
+        reference=(
+            None
+            if reference is None
+            else (
+                reference.green_left,
+                reference.green_right,
+                reference.yellow_x,
+            )
+        ),
+        selected_green=(
+            None
+            if selected is None
+            else (selected.green_left, selected.green_right)
+        ),
+        agreeing_scanlines=agreeing_scanlines,
+        rejection_reason=rejection_reason,
+        truncated=yellow_truncated or green_truncated,
+    )
+
+
+def _bounded_runs(
+    runs: list[tuple[int, int]],
+    *,
+    selected: tuple[int, int] | None = None,
+) -> tuple[tuple[tuple[int, int], ...], bool]:
+    if len(runs) <= _DIAGNOSTIC_RUN_LIMIT:
+        return tuple(runs), False
+    bounded = list(runs[:_DIAGNOSTIC_RUN_LIMIT])
+    if selected is not None and selected not in bounded:
+        bounded[-1] = selected
+    return tuple(bounded), True
 
 
 def _line_candidates(
