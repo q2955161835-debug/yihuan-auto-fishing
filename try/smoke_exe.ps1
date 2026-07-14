@@ -11,6 +11,15 @@ if ([string]::IsNullOrWhiteSpace($Exe)) {
 }
 $ExePath = (Resolve-Path -LiteralPath $Exe).Path
 
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
+$IsAdministrator = $Principal.IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdministrator) {
+    throw '烟雾测试必须在管理员 PowerShell 中运行，防止无法关闭 requireAdministrator 发布物并遗留进程'
+}
+
 $Launcher = Start-Process -FilePath $ExePath -PassThru
 $OwnedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 $null = $OwnedProcessIds.Add([int]$Launcher.Id)

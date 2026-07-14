@@ -225,3 +225,13 @@ def test_smoke_script_accepts_explicit_v2_target_path() -> None:
     assert "[string]$TargetPath" in script
     assert "$Exe = $TargetPath" in script
     assert "dist\\异环自动钓鱼.exe" in script
+
+
+def test_smoke_script_requires_elevated_session_before_launch() -> None:
+    script = (ROOT / "try" / "smoke_exe.ps1").read_text(encoding="utf-8-sig")
+
+    admin_check = script.index("IsInRole")
+    failure = script.index("烟雾测试必须在管理员 PowerShell 中运行")
+    launch = script.index("Start-Process -FilePath $ExePath")
+
+    assert admin_check < failure < launch
