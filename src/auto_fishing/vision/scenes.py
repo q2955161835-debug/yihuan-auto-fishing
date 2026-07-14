@@ -74,6 +74,9 @@ class SceneRecognizer:
     def set_bite_baseline(self, client_frame: np.ndarray) -> None:
         self.bite_detector.set_baseline(crop_normalized(client_frame, BITE_ROI))
 
+    def reset_progress_tracking(self) -> None:
+        self.progress_recognizer.reset()
+
     def observe(
         self,
         client_frame: np.ndarray,

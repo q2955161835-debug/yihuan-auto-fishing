@@ -126,12 +126,18 @@ def test_tracks_short_green_bar_when_marker_moves_far_outside() -> None:
         frame(green=(96, 136), yellow=116),
         0.0,
     )
-    observation = recognizer.detect(
+    pending = recognizer.analyze(
         frame(green=(100, 118), yellow=180),
         1 / 30,
     )
+    observation = recognizer.detect(
+        frame(green=(100, 118), yellow=180),
+        2 / 30,
+    )
 
     assert initial is not None
+    assert pending.observation is None
+    assert pending.rejection_reason == "jump_pending"
     assert observation is not None
     assert abs(observation.green_left - 100 / 300) < 0.02
     assert abs(observation.green_right - 119 / 300) < 0.02
@@ -153,7 +159,7 @@ def test_detects_short_bar_and_marker_independently_across_top_playfield() -> No
 def test_recovery_prefers_valid_short_bar_over_nearby_tiny_noise() -> None:
     recognizer = ProgressRecognizer()
     assert recognizer.detect(
-        frame(green=(96, 136), yellow=116),
+        frame(green=(96, 136), yellow=190),
         0.0,
     ) is not None
     image = frame(green=(150, 168), yellow=210)
@@ -168,12 +174,15 @@ def test_recovery_prefers_valid_short_bar_over_nearby_tiny_noise() -> None:
 
 
 def test_controller_moves_toward_inner_safe_band() -> None:
-    recognizer = ProgressRecognizer()
     controller = ProgressController(center_tolerance_ratio=0.10)
+    observations = [
+        ProgressObservation(70 / 300, 171 / 300, yellow / 300, 1.0, timestamp)
+        for yellow, timestamp in ((75, 1.0), (120, 1.1), (165, 1.2))
+    ]
 
-    assert controller.decide(recognizer.detect(frame(yellow=75), 1.0)) == Direction.RIGHT
-    assert controller.decide(recognizer.detect(frame(yellow=120), 1.1)) == Direction.RELEASE
-    assert controller.decide(recognizer.detect(frame(yellow=165), 1.2)) == Direction.LEFT
+    assert controller.decide(observations[0]) == Direction.RIGHT
+    assert controller.decide(observations[1]) == Direction.RELEASE
+    assert controller.decide(observations[2]) == Direction.LEFT
 
 
 def test_controller_moves_marker_right_when_it_is_left_of_green_center() -> None:
@@ -363,6 +372,38 @@ def test_large_single_frame_jump_is_released_until_confirmed() -> None:
 
     assert observation is not None
     assert observation.green_left > 0.55
+
+
+@pytest.mark.parametrize(
+    ("green", "yellow"),
+    [((50, 90), 52), ((210, 250), 248)],
+)
+def test_reset_accepts_extreme_marker_as_next_stage_first_frame(
+    green: tuple[int, int],
+    yellow: int,
+) -> None:
+    recognizer = ProgressRecognizer()
+
+    assert recognizer.detect(frame((100, 200), 150), 0.0) is not None
+    recognizer.reset()
+    result = recognizer.analyze(frame(green, yellow), 1 / 30)
+
+    assert result.observation is not None
+    assert result.rejection_reason == ""
+    assert abs(result.observation.yellow_x - yellow / 300) < 0.02
+
+
+def test_yellow_only_jump_is_released_until_confirmed() -> None:
+    recognizer = ProgressRecognizer()
+
+    assert recognizer.detect(frame((70, 170), 120), 0.0) is not None
+    pending = recognizer.analyze(frame((70, 170), 156), 1 / 30)
+    confirmed = recognizer.analyze(frame((70, 170), 156), 2 / 30)
+
+    assert pending.observation is None
+    assert pending.rejection_reason == "jump_pending"
+    assert confirmed.observation is not None
+    assert abs(confirmed.observation.yellow_x - 156 / 300) < 0.02
 
 
 def test_missing_frame_does_not_reuse_last_observation() -> None:
