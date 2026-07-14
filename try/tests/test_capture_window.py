@@ -149,6 +149,10 @@ class FakeUser32:
         self.client_origins = {100: (100, 100)}
         self.window_monitors = {100: 22}
         self.monitors = [(-1920, 0, 0, 1080, 11), (0, 0, 1920, 1080, 22)]
+        self.monitor_work_areas = {
+            11: (-1920, 0, 0, 1080),
+            22: (0, 0, 1920, 1080),
+        }
         self.monitor_devices = {11: r"\\.\DISPLAY1", 22: r"\\.\DISPLAY2"}
         self.valid_windows = {100}
         self.dpi_context_result = True
@@ -215,8 +219,20 @@ class FakeUser32:
         info.rcMonitor.top = top
         info.rcMonitor.right = right
         info.rcMonitor.bottom = bottom
+        work_left, work_top, work_right, work_bottom = self.monitor_work_areas[
+            handle
+        ]
+        info.rcWork.left = work_left
+        info.rcWork.top = work_top
+        info.rcWork.right = work_right
+        info.rcWork.bottom = work_bottom
         info.szDevice = self.monitor_devices[handle]
         return True
+
+    def MonitorFromRect(self, rect_pointer, _flags: int) -> int:
+        rect = rect_pointer._obj
+        center_x = (rect.left + rect.right) / 2
+        return 11 if center_x < 0 else 22
 
     def EnumDisplayMonitors(self, _hdc, _clip, callback, _data) -> bool:
         for left, top, right, bottom, handle in self.monitors:
@@ -378,6 +394,41 @@ def test_dpi_awareness_falls_back_and_capture_exclusion_reports_result() -> None
 
     assert user32.dpi_fallback_calls == 1
     assert service.exclude_from_capture(123) is True
+
+
+class FakeShcore:
+    def __init__(self, result: int) -> None:
+        self.result = result
+        self.calls: list[int] = []
+
+    def SetProcessDpiAwareness(self, awareness: int) -> int:
+        self.calls.append(awareness)
+        return self.result
+
+
+def test_dpi_awareness_tries_shcore_before_legacy_fallback() -> None:
+    user32 = FakeUser32()
+    user32.dpi_context_result = False
+    shcore = FakeShcore(0)
+    service = WindowService(
+        user32=user32,
+        shcore=shcore,
+        output_catalog=make_window_service(user32).output_catalog,
+    )
+
+    result = service.enable_dpi_awareness()
+
+    assert result == "per_monitor"
+    assert shcore.calls == [2]
+    assert user32.dpi_fallback_calls == 0
+
+
+def test_window_position_is_clamped_into_nearest_monitor_work_area() -> None:
+    user32 = FakeUser32()
+    service = make_window_service(user32)
+
+    assert service.clamp_window_position(5000, 5000, 400, 280) == (1520, 800)
+    assert service.clamp_window_position(-5000, 20, 400, 280) == (-1920, 20)
 
 
 class FakeHotkeyUser32:

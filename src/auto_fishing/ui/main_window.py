@@ -15,7 +15,16 @@ _WINDOW_HEIGHT = 240
 class MainWindow:
     """Always-on-top control window for the fishing automation."""
 
-    def __init__(self, root: tk.Misc, controller: Any, settings_store: Any) -> None:
+    def __init__(
+        self,
+        root: tk.Misc,
+        controller: Any,
+        settings_store: Any,
+        *,
+        window_title: str = "异环自动钓鱼",
+        diagnostics_enabled: bool = False,
+        position_clamper: Any | None = None,
+    ) -> None:
         self.root = root
         self.controller = controller
         self.settings_store = settings_store
@@ -26,13 +35,25 @@ class MainWindow:
         self._has_binding = False
         self._start_block_reason = ""
         self._state = FishingState.UNBOUND
+        self._diagnostics_enabled = diagnostics_enabled
+        self._diagnostic_path: Any | None = None
 
-        root.title("异环自动钓鱼")
+        root.title(window_title)
+        window_height = 300 if diagnostics_enabled else _WINDOW_HEIGHT
+        window_x = self.settings.window_x
+        window_y = self.settings.window_y
+        if position_clamper is not None:
+            window_x, window_y = position_clamper(
+                window_x,
+                window_y,
+                _WINDOW_WIDTH,
+                window_height,
+            )
         root.geometry(
-            f"{_WINDOW_WIDTH}x{_WINDOW_HEIGHT}"
-            f"{self.settings.window_x:+d}{self.settings.window_y:+d}"
+            f"{_WINDOW_WIDTH}x{window_height}"
+            f"{window_x:+d}{window_y:+d}"
         )
-        root.minsize(_WINDOW_WIDTH, _WINDOW_HEIGHT)
+        root.minsize(_WINDOW_WIDTH, window_height)
         root.attributes("-topmost", True)
 
         self.binding_var = tk.StringVar(master=root, value="未绑定")
@@ -51,6 +72,7 @@ class MainWindow:
         )
         self.fps_var = tk.StringVar(master=root, value="0.0 FPS")
         self.error_var = tk.StringVar(master=root, value="无")
+        self.diagnostic_path_var = tk.StringVar(master=root, value="")
 
         self._build_widgets()
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -140,8 +162,44 @@ class MainWindow:
             row=1, column=2, padx=2, pady=3, sticky="ew"
         )
 
+        if self._diagnostics_enabled:
+            self.report_button = ttk.Button(
+                buttons,
+                text="报告错误",
+                command=self.on_report_error,
+            )
+            self.report_button.grid(
+                row=2,
+                column=0,
+                padx=2,
+                pady=3,
+                sticky="ew",
+            )
+            self.open_report_button = ttk.Button(
+                buttons,
+                text="打开文件位置",
+                command=self.on_open_report,
+                state="disabled",
+            )
+            self.open_report_button.grid(
+                row=2,
+                column=1,
+                columnspan=2,
+                padx=2,
+                pady=3,
+                sticky="ew",
+            )
+            ttk.Label(
+                content,
+                textvariable=self.diagnostic_path_var,
+                wraplength=370,
+            ).grid(row=5, column=0, columnspan=4, sticky="w")
+
         ttk.Label(content, text="F8 紧急暂停").grid(
-            row=5, column=0, columnspan=4, sticky="w"
+            row=6 if self._diagnostics_enabled else 5,
+            column=0,
+            columnspan=4,
+            sticky="w",
         )
 
     def on_bind(self) -> None:
@@ -290,6 +348,39 @@ class MainWindow:
 
     def show_warning(self, reason: str) -> None:
         self.error_var.set(reason)
+
+    def on_report_error(self) -> None:
+        self._diagnostic_path = None
+        self.diagnostic_path_var.set("正在生成诊断包……")
+        self.open_report_button.configure(state="disabled")
+        try:
+            self.controller.report_error()
+        except Exception as error:
+            self.error_var.set(f"诊断包生成失败：{error}")
+
+    def show_diagnostic_result(self, result: Any) -> None:
+        if self._closed:
+            return
+        if result.error or result.path is None:
+            self._diagnostic_path = None
+            self.diagnostic_path_var.set("")
+            self.error_var.set(f"诊断包生成失败：{result.error or '未知错误'}")
+            self.open_report_button.configure(state="disabled")
+            return
+        self._diagnostic_path = result.path
+        self.diagnostic_path_var.set(f"诊断包：{result.path}")
+        self.error_var.set("诊断包已生成")
+        self.open_report_button.configure(state="normal")
+
+    def on_open_report(self) -> None:
+        path = self._diagnostic_path
+        if path is None:
+            return
+        try:
+            self.controller.open_report_location(path)
+        except Exception as error:
+            self.error_var.set(f"打开文件位置失败：{error}")
+            self.open_report_button.configure(state="disabled")
 
     def _queue_snapshot(self, snapshot: RuntimeSnapshot) -> None:
         if self._closed:

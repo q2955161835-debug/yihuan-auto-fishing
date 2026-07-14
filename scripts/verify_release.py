@@ -28,6 +28,26 @@ def validate_manifest(manifest: bytes) -> None:
         raise RuntimeError("release manifest must request requireAdministrator")
     if execution_level.attrib.get("uiAccess") != "false":
         raise RuntimeError("release manifest must keep uiAccess=false")
+    dpi_awareness = next(
+        (
+            element
+            for element in root.iter()
+            if element.tag.endswith("dpiAwareness")
+        ),
+        None,
+    )
+    if dpi_awareness is None or (dpi_awareness.text or "").strip() != "PerMonitorV2":
+        raise RuntimeError("release manifest must keep PerMonitorV2")
+    dpi_aware = next(
+        (
+            element
+            for element in root.iter()
+            if element.tag.endswith("dpiAware")
+        ),
+        None,
+    )
+    if dpi_aware is None or (dpi_aware.text or "").strip() != "true/pm":
+        raise RuntimeError("release manifest must keep true/pm DPI fallback")
 
 
 def read_embedded_manifest(executable: Path) -> bytes:
@@ -86,7 +106,10 @@ def main() -> int:
     parser.add_argument("executable", type=Path)
     args = parser.parse_args()
     validate_manifest(read_embedded_manifest(args.executable.resolve()))
-    print("RELEASE_MANIFEST_OK requireAdministrator uiAccess=false")
+    print(
+        "RELEASE_MANIFEST_OK requireAdministrator uiAccess=false "
+        "dpi=PerMonitorV2 fallback=true/pm"
+    )
     return 0
 
 

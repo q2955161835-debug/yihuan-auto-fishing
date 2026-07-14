@@ -50,6 +50,19 @@ _MIN_CLIENT_ASPECT_RATIO = 3.2
 _MAX_CLIENT_ASPECT_RATIO = 3.9
 
 
+def _target_outer_width(monitor_rect: Rect, game_client: Rect) -> int:
+    preferred = min(
+        monitor_rect.width,
+        max(
+            _CANONICAL_OUTER_WIDTH,
+            round(game_client.width * 2 / 3),
+        ),
+    )
+    ready_left = READY_ROI.to_pixels(game_client).left
+    max_without_ready_overlap = ready_left - monitor_rect.left
+    return max(1, min(preferred, max_without_ready_overlap))
+
+
 class _WinRect(ctypes.Structure):
     _fields_ = [
         ("left", wintypes.LONG),
@@ -288,13 +301,7 @@ class OnScreenKeyboardWindow:
         self._game_client = game_client
         position_denied: OnScreenKeyboardPositionDenied | None = None
         try:
-            target_width = min(
-                monitor_rect.width,
-                max(
-                    _CANONICAL_OUTER_WIDTH,
-                    round(game_client.width * 2 / 3),
-                ),
-            )
+            target_width = _target_outer_width(monitor_rect, game_client)
             self.api.position_bottom_left(
                 hwnd,
                 monitor_rect,

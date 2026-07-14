@@ -16,6 +16,7 @@ import numpy as np
 from auto_fishing.model import FishingState, RuntimeSnapshot, SceneObservation
 
 from .quota import StorageQuotaManager
+from .recording import frame_event_fields, thumbnail
 
 
 class RuntimeLogError(RuntimeError):
@@ -108,39 +109,19 @@ class RuntimeLogStore:
         self._ensure_started()
         self._frame_index += 1
         index = self._frame_index
-        thumbnail = _thumbnail(frame, self._MAX_FRAME_EDGE)
-        fields: dict[str, Any] = {
-            "frame_index": index,
-            "frame_timestamp": frame_timestamp,
-            "frame_age": now_monotonic - frame_timestamp,
-            "fps": snapshot.fps,
-            "state_before": state_before.value,
-            "state_after": snapshot.state.value,
-            "completed": snapshot.completed,
-            "target": snapshot.target,
-            "error": snapshot.error,
-            "bite": observation.bite,
-            "reel_prompt": observation.reel_prompt,
-            "ready": observation.ready,
-            "result": observation.result,
-            "result_candidate": observation.result_candidate,
-            "progress_scanlines": observation.progress_scanlines,
-            "progress_candidates": observation.progress_candidates,
-            "progress_rejection": observation.progress_rejection,
-        }
-        if observation.progress is not None:
-            fields.update(
-                {
-                    "green_left": observation.progress.green_left,
-                    "green_right": observation.progress.green_right,
-                    "yellow_x": observation.progress.yellow_x,
-                    "confidence": observation.progress.confidence,
-                }
-            )
+        frame_thumbnail = thumbnail(frame, self._MAX_FRAME_EDGE)
+        fields = frame_event_fields(
+            observation=observation,
+            state_before=state_before,
+            snapshot=snapshot,
+            frame_timestamp=frame_timestamp,
+            now_monotonic=now_monotonic,
+        )
+        fields["frame_index"] = index
         self._enqueue(
             _FrameItem(
                 index,
-                thumbnail,
+                frame_thumbnail,
                 self._event_record("frame.processed", fields, now_monotonic),
             )
         )
@@ -298,15 +279,3 @@ class RuntimeLogStore:
                 active_run=self._run_dir,
                 active_events=self._events_path,
             )
-
-
-def _thumbnail(frame: np.ndarray, max_edge: int) -> np.ndarray:
-    height, width = frame.shape[:2]
-    largest_edge = max(height, width)
-    if largest_edge <= max_edge:
-        return np.ascontiguousarray(frame).copy()
-    scale = max_edge / largest_edge
-    size = (round(width * scale), round(height * scale))
-    return np.ascontiguousarray(
-        cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-    ).copy()

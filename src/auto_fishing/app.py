@@ -10,10 +10,11 @@ import tkinter
 from typing import Any
 
 from auto_fishing.model import FishingState, RuntimeSnapshot
+from auto_fishing.product import ProductProfile, V1_DATA_DIR, v1_profile
 from auto_fishing.ui.main_window import MainWindow
 
 
-DEFAULT_DATA_DIR = Path(r"D:\29551\异环自动钓鱼数据")
+DEFAULT_DATA_DIR = V1_DATA_DIR
 
 
 BindTick = Callable[[int], None]
@@ -453,6 +454,24 @@ class AppController:
         finally:
             self._finish_command()
 
+    def report_error(self) -> None:
+        cancelled = self._cancel_pending_countdowns_for_pause()
+        self._defer_ui_callbacks(cancelled)
+        if not self._begin_command():
+            return
+        try:
+            self.engine.report_error()
+        finally:
+            self._finish_command()
+
+    def open_report_location(self, path: Path) -> None:
+        if not self._begin_command():
+            return
+        try:
+            self.engine.open_report_location(path)
+        finally:
+            self._finish_command()
+
     def resume(self, *, activate: bool = False) -> None:
         if not self._begin_command():
             return
@@ -500,6 +519,7 @@ class ApplicationServices:
     diagnostics: Any
     settings: Any
     runtime_log: Any | None = None
+    diagnostic_reporter: Any | None = None
 
 
 class Application:
@@ -512,17 +532,21 @@ class Application:
         root_factory: Callable[[], Any] = tkinter.Tk,
         main_window_factory: Callable[[Any, Any, Any], Any] = MainWindow,
         data_dir: Path | None = None,
+        profile: ProductProfile | None = None,
     ) -> None:
         self._services = services
         self._root_factory = root_factory
         self._main_window_factory = main_window_factory
         self._data_dir = data_dir
+        self._profile = profile
 
     def run(self) -> None:
         services = self._services
         if services is None:
-            data_dir = self._data_dir or DEFAULT_DATA_DIR
-            services = self._build_services(data_dir)
+            profile = self._profile or v1_profile()
+            if self._data_dir is not None:
+                profile = profile.with_data_dir(self._data_dir)
+            services = self._build_services(profile)
 
         root: Any | None = None
         run_error: BaseException | None = None
@@ -554,7 +578,33 @@ class Application:
                 root,
                 controller,
                 services.settings,
+                **(
+                    {
+                        "window_title": (
+                            self._profile.window_title
+                            if self._profile is not None
+                            else "异环自动钓鱼"
+                        ),
+                        "diagnostics_enabled": (
+                            services.diagnostic_reporter is not None
+                        ),
+                        "position_clamper": (
+                            services.window_service.clamp_window_position
+                        ),
+                    }
+                    if self._main_window_factory is MainWindow
+                    else {}
+                ),
             )
+            if services.diagnostic_reporter is not None:
+                services.diagnostic_reporter.subscribe(
+                    lambda result: root.after(
+                        0,
+                        lambda current=result: (
+                            main_window.show_diagnostic_result(current)
+                        ),
+                    )
+                )
             if runtime_log_error is not None:
                 main_window.block_start(
                     f"运行日志初始化失败：{runtime_log_error}"
@@ -585,6 +635,18 @@ class Application:
             root.mainloop()
         except BaseException as error:
             run_error = error
+            if services.diagnostic_reporter is not None:
+                try:
+                    services.diagnostic_reporter.request_report(
+                        report_type="automatic",
+                        code="E_APPLICATION",
+                        detail=str(error),
+                        state="应用异常",
+                        frame=None,
+                        context={"phase": "run"},
+                    )
+                except BaseException:
+                    pass
 
         cleanup_errors = self._cleanup(services, root)
         if run_error is not None:
@@ -598,7 +660,9 @@ class Application:
             raise BaseExceptionGroup("程序关闭清理失败", cleanup_errors)
 
     @staticmethod
-    def _build_services(data_dir: Path) -> ApplicationServices:
+    def _build_services(
+        profile_or_data_dir: ProductProfile | Path,
+    ) -> ApplicationServices:
         from auto_fishing.automation.engine import AutomationCore, AutomationEngine
         from auto_fishing.automation.state_machine import FishingStateMachine
         from auto_fishing.capture.dxcam_source import DxcamFrameSource
@@ -610,16 +674,46 @@ class Application:
         )
         from auto_fishing.platform.windowing import WindowService
         from auto_fishing.storage.diagnostics import DiagnosticsStore
+        from auto_fishing.storage.diagnostic_bundles import (
+            DiagnosticBundleService,
+            NullDiagnosticsStore,
+        )
+        from auto_fishing.storage.memory_diagnostics import (
+            MemoryDiagnosticRecorder,
+        )
         from auto_fishing.storage.quota import StorageQuotaManager
         from auto_fishing.storage.runtime_logging import RuntimeLogStore
         from auto_fishing.storage.settings import SettingsStore
         from auto_fishing.vision.progress import ProgressController
         from auto_fishing.vision.scenes import SceneRecognizer
 
+        profile = (
+            v1_profile(profile_or_data_dir)
+            if isinstance(profile_or_data_dir, Path)
+            else profile_or_data_dir
+        )
+        data_dir = profile.data_dir
         window_service = WindowService()
-        quota = StorageQuotaManager(data_dir)
-        quota.initialize()
-        runtime_log = RuntimeLogStore(data_dir / "runs", quota=quota)
+        quota: StorageQuotaManager | None
+        diagnostic_reporter: DiagnosticBundleService | None
+        if profile.use_disk_runtime_log:
+            quota = StorageQuotaManager(data_dir)
+            quota.initialize()
+            runtime_log: Any = RuntimeLogStore(data_dir / "runs", quota=quota)
+            diagnostics: Any = DiagnosticsStore(
+                data_dir / "diagnostics",
+                quota=quota,
+            )
+            diagnostic_reporter = None
+        else:
+            quota = None
+            runtime_log = MemoryDiagnosticRecorder()
+            diagnostics = NullDiagnosticsStore()
+            diagnostic_reporter = DiagnosticBundleService(
+                data_dir / "diagnostics",
+                recorder=runtime_log,
+                version=profile.version,
+            )
         keyboard_window = OnScreenKeyboardWindow(recorder=runtime_log)
         safe_input = SafeInput(
             OnScreenKeyboardInputBackend(
@@ -637,7 +731,6 @@ class Application:
             scene_recognizer=scene_recognizer,
             event_recorder=runtime_log,
         )
-        diagnostics = DiagnosticsStore(data_dir / "diagnostics", quota=quota)
         engine = AutomationEngine(
             core=core,
             window_service=window_service,
@@ -645,6 +738,7 @@ class Application:
             scene_recognizer=scene_recognizer,
             diagnostics=diagnostics,
             runtime_log=runtime_log,
+            diagnostic_reporter=diagnostic_reporter,
         )
         return ApplicationServices(
             window_service=window_service,
@@ -654,6 +748,7 @@ class Application:
             diagnostics=diagnostics,
             settings=SettingsStore(data_dir / "config.json", quota=quota),
             runtime_log=runtime_log,
+            diagnostic_reporter=diagnostic_reporter,
         )
 
     @staticmethod
@@ -685,6 +780,13 @@ class Application:
                 error.add_note("销毁 Tk 主窗口")
                 errors.append(error)
                 Application._record_cleanup_failure(services, "销毁 Tk 主窗口", error)
+
+        if services.diagnostic_reporter is not None:
+            try:
+                services.diagnostic_reporter.close(timeout=2.0)
+            except BaseException as error:
+                error.add_note("关闭诊断报告服务")
+                errors.append(error)
 
         if services.runtime_log is not None:
             try:

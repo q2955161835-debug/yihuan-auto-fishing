@@ -1,8 +1,24 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param(
+    [string]$TargetPath
+)
+
+$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Console]::OutputEncoding
-$Exe = Resolve-Path (Join-Path $PSScriptRoot '..\dist\异环自动钓鱼.exe')
-$ExePath = $Exe.Path
+$Exe = $TargetPath
+if ([string]::IsNullOrWhiteSpace($Exe)) {
+    $Exe = Join-Path $PSScriptRoot '..\dist\异环自动钓鱼.exe'
+}
+$ExePath = (Resolve-Path -LiteralPath $Exe).Path
+
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
+$IsAdministrator = $Principal.IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdministrator) {
+    throw '烟雾测试必须在管理员 PowerShell 中运行，防止无法关闭 requireAdministrator 发布物并遗留进程'
+}
 
 $Launcher = Start-Process -FilePath $ExePath -PassThru
 $OwnedProcessIds = [System.Collections.Generic.HashSet[int]]::new()

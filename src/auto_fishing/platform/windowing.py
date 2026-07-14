@@ -12,6 +12,8 @@ from auto_fishing.model import Rect
 
 
 MONITOR_DEFAULTTONEAREST = 2
+PROCESS_PER_MONITOR_DPI_AWARE = 2
+E_ACCESSDENIED = 0x80070005
 GA_ROOT = 2
 SW_RESTORE = 9
 WDA_EXCLUDEFROMCAPTURE = 0x11
@@ -91,22 +93,105 @@ class WindowService:
     def __init__(
         self,
         user32: Any | None = None,
+        shcore: Any | None = None,
         own_hwnd: int | None = None,
         output_catalog: DxcamOutputCatalog | None = None,
     ) -> None:
-        self.user32 = user32 or ctypes.windll.user32
+        native_user32 = user32 is None
+        if user32 is None:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetProcessDpiAwarenessContext.argtypes = (ctypes.c_void_p,)
+            user32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
+            user32.SetProcessDPIAware.argtypes = ()
+            user32.SetProcessDPIAware.restype = wintypes.BOOL
+            user32.MonitorFromRect.argtypes = (
+                ctypes.POINTER(_WinRect),
+                wintypes.DWORD,
+            )
+            user32.MonitorFromRect.restype = wintypes.HMONITOR
+        self.user32 = user32
+        if shcore is None and native_user32:
+            try:
+                shcore = ctypes.WinDLL("shcore", use_last_error=True)
+                shcore.SetProcessDpiAwareness.argtypes = (ctypes.c_int,)
+                shcore.SetProcessDpiAwareness.restype = ctypes.c_long
+            except (AttributeError, OSError):
+                shcore = None
+        self.shcore = shcore
+        self._native_user32 = native_user32
+        self.dpi_awareness = "unknown"
         self.own_hwnd = own_hwnd
         self.output_catalog = output_catalog or DxcamOutputCatalog()
 
-    def enable_dpi_awareness(self) -> None:
+    def enable_dpi_awareness(self) -> str:
         try:
             enabled = bool(
                 self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
             )
         except (AttributeError, OSError):
             enabled = False
-        if not enabled:
-            self.user32.SetProcessDPIAware()
+        if enabled:
+            self.dpi_awareness = "per_monitor_v2"
+            return self.dpi_awareness
+        if self._native_user32 and ctypes.get_last_error() == 5:
+            self.dpi_awareness = "manifest_or_existing"
+            return self.dpi_awareness
+
+        if self.shcore is not None:
+            try:
+                result = int(
+                    self.shcore.SetProcessDpiAwareness(
+                        PROCESS_PER_MONITOR_DPI_AWARE
+                    )
+                )
+            except (AttributeError, OSError):
+                result = 1
+            if result == 0:
+                self.dpi_awareness = "per_monitor"
+                return self.dpi_awareness
+            if result & 0xFFFFFFFF == E_ACCESSDENIED:
+                self.dpi_awareness = "manifest_or_existing"
+                return self.dpi_awareness
+
+        try:
+            legacy_enabled = bool(self.user32.SetProcessDPIAware())
+        except (AttributeError, OSError):
+            legacy_enabled = False
+        self.dpi_awareness = (
+            "system" if legacy_enabled else "manifest_or_unknown"
+        )
+        return self.dpi_awareness
+
+    def clamp_window_position(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> tuple[int, int]:
+        native = _WinRect(x, y, x + width, y + height)
+        monitor_handle = _handle_value(
+            self.user32.MonitorFromRect(
+                ctypes.byref(native),
+                MONITOR_DEFAULTTONEAREST,
+            )
+        )
+        if not monitor_handle:
+            return x, y
+        info = _MonitorInfoEx()
+        info.cbSize = ctypes.sizeof(info)
+        if not self.user32.GetMonitorInfoW(monitor_handle, ctypes.byref(info)):
+            return x, y
+        work = Rect(
+            int(info.rcWork.left),
+            int(info.rcWork.top),
+            int(info.rcWork.right),
+            int(info.rcWork.bottom),
+        )
+        return (
+            min(max(x, work.left), max(work.left, work.right - width)),
+            min(max(y, work.top), max(work.top, work.bottom - height)),
+        )
 
     def bind_foreground(self) -> BoundWindow:
         hwnd = int(self.user32.GetForegroundWindow() or 0)

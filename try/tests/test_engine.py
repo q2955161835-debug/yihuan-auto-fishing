@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import json
+from concurrent.futures import Future
 from collections.abc import Callable
 
 import cv2
@@ -69,6 +70,21 @@ class RecordingInput:
         if self.occlusion_error is not None:
             raise self.occlusion_error
         return self.occlusion
+
+
+class RecordingReporter:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+        self.opened: list[object] = []
+
+    def request_report(self, **fields: object) -> Future:
+        self.requests.append(dict(fields))
+        future: Future = Future()
+        future.set_result(None)
+        return future
+
+    def open_location(self, path: object) -> None:
+        self.opened.append(path)
 
 
 class ReleaseFailingInput(RecordingInput):
@@ -702,6 +718,8 @@ def make_engine(
     window_service: RecordingWindowService | None = None,
     input_service: RecordingInput | None = None,
     runtime_log: RecordingRuntimeLog | None = None,
+    diagnostic_reporter: RecordingReporter | None = None,
+    bind: bool = True,
 ) -> tuple[
     AutomationEngine,
     AutomationCore,
@@ -727,9 +745,56 @@ def make_engine(
         scene_recognizer=recognizer,
         diagnostics=DiagnosticsStore(tmp_path / "diagnostics"),
         runtime_log=runtime_log,
+        diagnostic_reporter=diagnostic_reporter,
     )
-    engine.bind(BOUND)
+    if bind:
+        engine.bind(BOUND)
     return engine, core, input_service, window_service, frame_source
+
+
+def test_engine_auto_error_reports_once_after_inputs_are_released(tmp_path) -> None:
+    reporter = RecordingReporter()
+    engine, _core, input_service, _window, _source = make_engine(
+        tmp_path,
+        diagnostic_reporter=reporter,
+    )
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    engine._pause("E_VISION", "识别失败", frame)
+    engine._pause("E_VISION", "识别失败", frame)
+
+    assert input_service.events.count("release") >= 1
+    assert len(reporter.requests) == 1
+    assert reporter.requests[0]["report_type"] == "automatic"
+    assert reporter.requests[0]["code"] == "E_VISION"
+
+
+def test_manual_report_releases_inputs_even_when_unbound(tmp_path) -> None:
+    reporter = RecordingReporter()
+    engine, _core, input_service, _window, _source = make_engine(
+        tmp_path,
+        diagnostic_reporter=reporter,
+        bind=False,
+    )
+
+    engine.report_error()
+
+    assert input_service.events.count("release") == 1
+    assert reporter.requests[0]["report_type"] == "manual_report"
+    assert reporter.requests[0]["frame"] is None
+
+
+def test_engine_opens_report_location_through_reporter(tmp_path) -> None:
+    reporter = RecordingReporter()
+    engine, _core, _input, _window, _source = make_engine(
+        tmp_path,
+        diagnostic_reporter=reporter,
+    )
+    path = tmp_path / "report.zip"
+
+    engine.open_report_location(path)
+
+    assert reporter.opened == [path]
 
 
 def test_engine_bind_prepares_input_for_bound_monitor(tmp_path) -> None:

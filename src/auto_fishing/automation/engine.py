@@ -442,6 +442,7 @@ class AutomationEngine:
         scene_recognizer: Any,
         diagnostics: Any,
         runtime_log: Any | None = None,
+        diagnostic_reporter: Any | None = None,
         clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -451,6 +452,7 @@ class AutomationEngine:
         self.scene_recognizer = scene_recognizer
         self.diagnostics = diagnostics
         self.runtime_log = runtime_log
+        self.diagnostic_reporter = diagnostic_reporter
         self.clock = clock
         self.logger = logger or logging.getLogger(__name__)
         self._bound: Any | None = None
@@ -481,6 +483,7 @@ class AutomationEngine:
         self._pause_lock = threading.RLock()
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
+        self._last_client_frame: np.ndarray | None = None
         self._progress_frames: deque[np.ndarray] = deque(maxlen=12)
         self._last_refresh = float("-inf")
         self._last_logged_status: tuple[str, int, int, str] | None = None
@@ -560,6 +563,7 @@ class AutomationEngine:
                 start_epoch = self._pause_epoch
             self._diagnostic_recorded = False
             self._last_frame = None
+            self._last_client_frame = None
             self._progress_frames.clear()
             self._last_refresh = float("-inf")
             self._last_logged_status = None
@@ -730,6 +734,46 @@ class AutomationEngine:
         )
         self._pause("E_USER_PAUSE", reason, frame)
 
+    def report_error(self) -> Any | None:
+        state = self.core.snapshot.state
+        if state in {FishingState.UNBOUND, FishingState.COMPLETE}:
+            self.core.block_input()
+            try:
+                self.core.release_inputs()
+            except InputActionError as error:
+                release_detail = f"；释放输入失败：{error}"
+            else:
+                release_detail = ""
+        else:
+            release_detail = ""
+            self._pause(
+                "E_USER_PAUSE",
+                "主动报告错误",
+                self._last_frame,
+                save_diagnostic=False,
+                replace_existing=True,
+            )
+        if self.diagnostic_reporter is None:
+            return None
+        frame = (
+            None
+            if self._last_client_frame is None
+            else np.ascontiguousarray(self._last_client_frame).copy()
+        )
+        return self.diagnostic_reporter.request_report(
+            report_type="manual_report",
+            code="MANUAL_REPORT",
+            detail=f"用户主动报告错误{release_detail}",
+            state=self.core.snapshot.state.value,
+            frame=frame,
+            context=self._diagnostic_context(),
+        )
+
+    def open_report_location(self, path: Any) -> None:
+        if self.diagnostic_reporter is None:
+            raise RuntimeError("当前版本没有诊断报告服务")
+        self.diagnostic_reporter.open_location(path)
+
     def resume(self, *, activate: bool = False) -> None:
         with self._pause_lock:
             requested_epoch = self._pause_epoch
@@ -808,6 +852,7 @@ class AutomationEngine:
             self.core.cancel_current(self.clock())
             self._diagnostic_recorded = False
             self._last_frame = None
+            self._last_client_frame = None
             self._progress_frames.clear()
             self._last_refresh = float("-inf")
             self._publish()
@@ -969,6 +1014,7 @@ class AutomationEngine:
                     )
                     self._shutdown_event.wait(0.005)
                     continue
+                self._last_client_frame = np.ascontiguousarray(client_frame).copy()
 
                 try:
                     occlusion = self._client_occlusion(bound)
@@ -1167,19 +1213,42 @@ class AutomationEngine:
         )
 
         save_diagnostic_now = False
+        request_bundle_now = False
         with self._pause_lock:
             if pause_epoch == self._pause_epoch:
                 self._latest_pause_reason = actual_detail
                 self._latest_pause_code = actual_code
-            should_save = save_diagnostic or actual_code == "E_INPUT"
-            if (
-                should_save
-                and not self._diagnostic_recorded
-                and frame is not None
-            ):
-                self._diagnostic_recorded = True
-                save_diagnostic_now = True
-        if save_diagnostic_now:
+            if self.diagnostic_reporter is not None:
+                if actual_code != "E_USER_PAUSE" and not self._diagnostic_recorded:
+                    self._diagnostic_recorded = True
+                    request_bundle_now = True
+            else:
+                should_save = save_diagnostic or actual_code == "E_INPUT"
+                if (
+                    should_save
+                    and not self._diagnostic_recorded
+                    and frame is not None
+                ):
+                    self._diagnostic_recorded = True
+                    save_diagnostic_now = True
+        if request_bundle_now:
+            diagnostic_frame = (
+                None
+                if self._last_client_frame is None
+                else np.ascontiguousarray(self._last_client_frame).copy()
+            )
+            try:
+                self.diagnostic_reporter.request_report(
+                    report_type="automatic",
+                    code=actual_code,
+                    detail=actual_detail,
+                    state=self.core.snapshot.state.value,
+                    frame=diagnostic_frame,
+                    context=self._diagnostic_context(),
+                )
+            except Exception as error:
+                self.logger.warning("生成诊断包失败: %s", error)
+        elif save_diagnostic_now:
             try:
                 self.diagnostics.save(
                     frame,
@@ -1334,6 +1403,32 @@ class AutomationEngine:
             self.runtime_log.event(name, **fields)
         except Exception as error:
             self.logger.warning("保存运行日志事件失败: %s", error)
+
+    def _diagnostic_context(self) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "dpi_awareness": getattr(
+                self.window_service,
+                "dpi_awareness",
+                "unknown",
+            )
+        }
+        bound = self._bound
+        if bound is not None:
+            context["monitor_rect"] = self._rect_values(bound.monitor_rect)
+            context["client_rect"] = self._rect_values(bound.client_rect)
+            context["game_hwnd"] = getattr(bound, "hwnd", None)
+        try:
+            osk_rect = self.core.input_service.occlusion_rect()
+        except Exception as error:
+            context["osk_rect_error"] = str(error)
+        else:
+            if osk_rect is not None:
+                context["osk_rect"] = self._rect_values(osk_rect)
+        return context
+
+    @staticmethod
+    def _rect_values(rect: Any) -> list[int]:
+        return [rect.left, rect.top, rect.right, rect.bottom]
 
     def _activate_bound(self, bound: Any) -> None:
         self._runtime_event(
