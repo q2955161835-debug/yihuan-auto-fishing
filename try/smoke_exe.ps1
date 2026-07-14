@@ -1,8 +1,15 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param(
+    [string]$TargetPath
+)
+
+$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Console]::OutputEncoding
-$Exe = Resolve-Path (Join-Path $PSScriptRoot '..\dist\异环自动钓鱼.exe')
-$ExePath = $Exe.Path
+$Exe = $TargetPath
+if ([string]::IsNullOrWhiteSpace($Exe)) {
+    $Exe = Join-Path $PSScriptRoot '..\dist\异环自动钓鱼.exe'
+}
+$ExePath = (Resolve-Path -LiteralPath $Exe).Path
 
 $Launcher = Start-Process -FilePath $ExePath -PassThru
 $OwnedProcessIds = [System.Collections.Generic.HashSet[int]]::new()

@@ -47,6 +47,31 @@ def test_pyinstaller_spec_builds_single_windowed_executable():
     assert "--uac-admin" not in spec
 
 
+def test_v2_spec_uses_v2_entry_and_filename() -> None:
+    spec = (ROOT / "packaging" / "auto_fishing_v2.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert "collect_all('dxcam')" in spec
+    assert "src/auto_fishing/__main_v2__.py" in spec
+    assert "name='异环自动钓鱼V2'" in spec
+    assert "console=False" in spec
+    assert "uac_admin=True" in spec
+    assert "app.manifest" in spec
+
+
+def test_v2_build_runs_tests_verifies_manifest_and_hash() -> None:
+    script = (ROOT / "scripts" / "build_v2.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert "auto_fishing_v2.spec" in script
+    assert "dist\\异环自动钓鱼V2.exe" in script
+    assert "scripts\\verify_release.py" in script
+    assert "Get-FileHash -Algorithm SHA256" in script
+    assert "-m pytest" in script
+
+
 def test_build_script_gates_packaging_on_tests_and_prints_sha256():
     script = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
 
@@ -137,7 +162,11 @@ def test_install_documentation_installs_project_before_running_it():
 
 
 def test_powershell_scripts_are_utf8_bom_for_windows_powershell_compatibility():
-    for relative_path in ("scripts/build.ps1", "try/smoke_exe.ps1"):
+    for relative_path in (
+        "scripts/build.ps1",
+        "scripts/build_v2.ps1",
+        "try/smoke_exe.ps1",
+    ):
         script_path = ROOT / relative_path
         assert script_path.read_bytes().startswith(b"\xef\xbb\xbf")
         script = script_path.read_text(encoding="utf-8-sig")
@@ -187,3 +216,12 @@ def test_smoke_script_polls_for_process_exit_after_forced_stop():
     residual_index = script.index("发布物仍有残留进程")
 
     assert stop_index < deadline_index < poll_index < residual_index
+
+
+def test_smoke_script_accepts_explicit_v2_target_path() -> None:
+    script = (ROOT / "try" / "smoke_exe.ps1").read_text(encoding="utf-8-sig")
+
+    assert "param(" in script
+    assert "[string]$TargetPath" in script
+    assert "$Exe = $TargetPath" in script
+    assert "dist\\异环自动钓鱼.exe" in script

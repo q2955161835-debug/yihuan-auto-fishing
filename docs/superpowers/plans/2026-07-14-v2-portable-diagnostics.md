@@ -733,7 +733,7 @@ git commit -m "feat: harden v2 windows display compatibility"
 **Interfaces:**
 - Produces: `dist/异环自动钓鱼V2.exe`
 - Produces: `scripts/build_v2.ps1 -PythonPath <path>`
-- Extends: smoke script with optional `-ExecutablePath`, defaulting to the existing V1 path for backward compatibility.
+- Extends: smoke script with optional `-TargetPath`, defaulting to the existing V1 path for backward compatibility; the name deliberately avoids the existing safety assertion that forbids WMI `ExecutablePath` filtering.
 
 - [ ] **Step 1: Write failing packaging structure tests**
 
@@ -805,7 +805,7 @@ exe = EXE(
 
 - [ ] **Step 4: Create UTF-8 BOM PowerShell build script and parameterize smoke**
 
-`build_v2.ps1` follows `build.ps1`: resolve `.venv` or override, run full `try/tests`, build V2 spec, verify the final embedded manifest, print SHA256. `try/smoke_exe.ps1 -ExecutablePath` must still track and stop only the launched process tree.
+`build_v2.ps1` follows `build.ps1`: resolve `.venv` or override, run full `try/tests`, build V2 spec, verify the final embedded manifest, print SHA256. `try/smoke_exe.ps1 -TargetPath` must still track and stop only the launched process tree.
 
 - [ ] **Step 5: Run packaging tests**
 
@@ -899,7 +899,7 @@ Run:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_v2.ps1 -PythonPath C:\Users\29551\AppData\Local\Programs\Python\Python313\python.exe
 py -3.13 scripts/verify_release.py dist/异环自动钓鱼V2.exe
-powershell -ExecutionPolicy Bypass -File try/smoke_exe.ps1 -ExecutablePath dist/异环自动钓鱼V2.exe
+powershell -ExecutionPolicy Bypass -File try/smoke_exe.ps1 -TargetPath dist/异环自动钓鱼V2.exe
 Get-FileHash -Algorithm SHA256 -LiteralPath dist/异环自动钓鱼V2.exe
 ```
 
