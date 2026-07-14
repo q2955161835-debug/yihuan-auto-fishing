@@ -21,7 +21,7 @@ from auto_fishing.storage.diagnostic_bundles import (
 )
 
 
-def test_memory_recorder_keeps_ten_seconds_and_samples_ten_fps(
+def test_memory_recorder_samples_ten_fps_for_the_latest_ten_seconds(
     tmp_path,
 ) -> None:
     clock = [0.0]
@@ -44,8 +44,8 @@ def test_memory_recorder_keeps_ten_seconds_and_samples_ten_fps(
         )
 
     snapshot = recorder.snapshot()
-    assert snapshot.events[0]["monotonic"] >= 2.0
     assert len(snapshot.frames) == 101
+    assert snapshot.frames[0].monotonic >= 2.0
     decoded = cv2.imdecode(
         np.frombuffer(snapshot.frames[-1].jpeg, dtype=np.uint8),
         cv2.IMREAD_COLOR,
@@ -53,6 +53,28 @@ def test_memory_recorder_keeps_ten_seconds_and_samples_ten_fps(
     assert decoded is not None
     assert max(decoded.shape[:2]) == 480
     assert list(tmp_path.iterdir()) == []
+
+
+def test_memory_recorder_keeps_twenty_seconds_of_events() -> None:
+    clock = [0.0]
+    recorder = MemoryDiagnosticRecorder(clock=lambda: clock[0])
+    recorder.event("progress.control", direction="left")
+
+    clock[0] = 15.0
+    recorder.event("manual.report")
+
+    assert [event["event"] for event in recorder.snapshot().events] == [
+        "progress.control",
+        "manual.report",
+    ]
+
+    clock[0] = 21.0
+    recorder.event("later.event")
+
+    assert [event["event"] for event in recorder.snapshot().events] == [
+        "manual.report",
+        "later.event",
+    ]
 
 
 def _populated_recorder() -> MemoryDiagnosticRecorder:

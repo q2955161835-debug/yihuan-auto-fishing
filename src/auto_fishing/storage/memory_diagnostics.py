@@ -30,7 +30,8 @@ class DiagnosticSnapshot:
 
 
 class MemoryDiagnosticRecorder:
-    _WINDOW_SECONDS = 10.0
+    _EVENT_WINDOW_SECONDS = 20.0
+    _FRAME_WINDOW_SECONDS = 10.0
     _FRAME_INTERVAL = 0.1
 
     def __init__(
@@ -138,10 +139,14 @@ class MemoryDiagnosticRecorder:
             self._prune_locked(monotonic)
 
     def _prune_locked(self, monotonic: float) -> None:
-        cutoff = monotonic - self._WINDOW_SECONDS
-        while self._events and self._events[0]["monotonic"] < cutoff - 1e-9:
+        event_cutoff = monotonic - self._EVENT_WINDOW_SECONDS
+        while (
+            self._events
+            and self._events[0]["monotonic"] < event_cutoff - 1e-9
+        ):
             self._events.popleft()
-        while self._frames and self._frames[0].monotonic < cutoff - 1e-9:
+        frame_cutoff = monotonic - self._FRAME_WINDOW_SECONDS
+        while self._frames and self._frames[0].monotonic < frame_cutoff - 1e-9:
             self._frames.popleft()
 
     def _aware_now(self) -> datetime:

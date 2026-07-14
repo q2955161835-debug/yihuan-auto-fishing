@@ -10,8 +10,9 @@ from auto_fishing.model import Direction, ProgressObservation
 
 
 _SCAN_FRACTIONS = (0.40, 0.43, 0.46, 0.49, 0.52)
-_SIDE_EXCLUSION = 0.16
+_SIDE_EXCLUSION = 0.14
 _MINIMUM_GREEN_WIDTH_RATIO = 0.012
+_YELLOW_MIN_VERTICAL_COVERAGE = 0.35
 _CONTROL_HISTORY_LIMIT = 15
 _CONTROL_RECENCY_DECAY = 0.20
 _CONTROL_MAX_FRAME_GAP_SECONDS = 0.20
@@ -71,8 +72,8 @@ class ProgressRecognizer:
         )
         yellow_mask = cv2.inRange(
             hsv,
-            np.array((18, 120, 150), dtype=np.uint8),
-            np.array((38, 255, 255), dtype=np.uint8),
+            np.array((18, 40, 120), dtype=np.uint8),
+            np.array((50, 255, 255), dtype=np.uint8),
         )
         green_mask = cv2.morphologyEx(
             green_mask,
@@ -89,7 +90,11 @@ class ProgressRecognizer:
         band_bottom = max(rows) + 1
         side = round(image_width * _SIDE_EXCLUSION)
         yellow_band = yellow_mask[band_top:band_bottom, side : image_width - side]
-        yellow_columns = (yellow_band > 0).sum(axis=0) >= 3
+        minimum_yellow_rows = max(
+            3,
+            int(np.ceil(yellow_band.shape[0] * _YELLOW_MIN_VERTICAL_COVERAGE)),
+        )
+        yellow_columns = (yellow_band > 0).sum(axis=0) >= minimum_yellow_rows
         yellow_runs = _runs(yellow_columns, side)
         yellow_runs = [
             run

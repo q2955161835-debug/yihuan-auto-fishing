@@ -10,6 +10,7 @@ from auto_fishing.vision.progress import ProgressController, ProgressRecognizer
 
 GREEN_BGR = (255, 210, 30)
 YELLOW_BGR = (0, 230, 255)
+LOW_SATURATION_YELLOW_BGR = (141, 195, 191)
 
 
 def frame(
@@ -18,6 +19,7 @@ def frame(
     *,
     green_y: tuple[int, int] = (40, 70),
     yellow_y: tuple[int, int] = (34, 76),
+    yellow_bgr: tuple[int, int, int] = YELLOW_BGR,
 ) -> np.ndarray:
     image = np.zeros((120, 300, 3), dtype=np.uint8)
     cv2.rectangle(
@@ -31,7 +33,7 @@ def frame(
         image,
         (yellow - 3, yellow_y[0]),
         (yellow + 3, yellow_y[1]),
-        YELLOW_BGR,
+        yellow_bgr,
         -1,
     )
     return image
@@ -59,6 +61,26 @@ def test_detects_green_interval_and_yellow_marker() -> None:
     assert 0.55 < obs.green_right < 0.59
     assert 0.38 < obs.yellow_x < 0.42
     assert obs.timestamp == 1.0
+
+
+def test_detects_low_saturation_yellow_marker_in_fixed_top_slot() -> None:
+    observation = ProgressRecognizer().detect(
+        frame(yellow_bgr=LOW_SATURATION_YELLOW_BGR),
+        1.0,
+    )
+
+    assert observation is not None
+    assert abs(observation.yellow_x - 120 / 300) < 0.01
+
+
+def test_detects_yellow_marker_at_left_edge_of_fixed_top_slot() -> None:
+    observation = ProgressRecognizer().detect(
+        frame(green=(150, 180), yellow=45),
+        1.0,
+    )
+
+    assert observation is not None
+    assert abs(observation.yellow_x - 45 / 300) < 0.01
 
 
 def test_real_split_marker_fixture_reconstructs_full_green_interval() -> None:
