@@ -374,9 +374,13 @@ class ScriptedRecognizer:
         self.frames: list[np.ndarray] = []
         self.occlusions: list[Rect | None] = []
         self.observed = threading.Event()
+        self.progress_reset_calls = 0
 
     def set_bite_baseline(self, _frame: np.ndarray) -> None:
         return None
+
+    def reset_progress_tracking(self) -> None:
+        self.progress_reset_calls += 1
 
     def observe(
         self,
@@ -912,6 +916,31 @@ def test_inter_round_interval_precedes_generic_timeout() -> None:
 
     assert core.snapshot.state is FishingState.WAIT_BITE
     assert input_service.events.count("F") == 1
+
+
+def test_second_f_resets_progress_vision_before_waiting_for_bar() -> None:
+    recognizer = ScriptedRecognizer()
+    input_service = RecordingInput()
+    state_machine = FishingStateMachine()
+    core = AutomationCore(
+        state_machine=state_machine,
+        controller=ProgressController(),
+        input_service=input_service,
+        scene_recognizer=recognizer,
+    )
+    core.start(1, 0.0)
+    packet = FramePacket(
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        0.0,
+        30.0,
+    )
+
+    core.process(SceneObservation(), packet, 0.01, CLIENT)
+    core.process(SceneObservation(bite=True), packet, 0.02, CLIENT)
+
+    assert core.snapshot.state is FishingState.WAIT_BAR
+    assert input_service.events == ["F", "F"]
+    assert recognizer.progress_reset_calls == 1
 
 
 def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> None:

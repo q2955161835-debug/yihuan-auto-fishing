@@ -252,6 +252,7 @@ class AutomationCore:
         elif state is FishingState.WAIT_BITE and observation.bite:
             self._input(self.input_service.tap_f)
             self.state_machine.handle(Event.REEL_SENT, now)
+            self.scene_recognizer.reset_progress_tracking()
         elif state is FishingState.WAIT_BAR and observation.progress is not None:
             self.state_machine.handle(Event.BAR_DETECTED, now)
         elif state is FishingState.CONTROL:

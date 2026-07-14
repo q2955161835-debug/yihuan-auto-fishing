@@ -12,6 +12,7 @@ from auto_fishing.model import Direction, ProgressObservation
 _SCAN_FRACTIONS = (0.40, 0.43, 0.46, 0.49, 0.52)
 _SIDE_EXCLUSION = 0.16
 _MINIMUM_GREEN_WIDTH_RATIO = 0.012
+_YELLOW_JUMP_THRESHOLD = 0.08
 _CONTROL_HISTORY_LIMIT = 15
 _CONTROL_RECENCY_DECAY = 0.20
 _CONTROL_MAX_FRAME_GAP_SECONDS = 0.20
@@ -38,6 +39,10 @@ class ProgressRecognizer:
         self._history: deque[ProgressObservation] = deque(maxlen=5)
         self._pending_jump: ProgressObservation | None = None
 
+    def reset(self) -> None:
+        self._history.clear()
+        self._pending_jump = None
+
     def detect(
         self,
         image: np.ndarray,
@@ -56,10 +61,12 @@ class ProgressRecognizer:
             self._pending_jump = None
             return result
 
-        if self._history and _center_jump(
-            self._history[-1],
-            observation,
-        ) > 0.20:
+        previous = self._history[-1] if self._history else None
+        if previous is not None and (
+            _center_jump(previous, observation) > 0.20
+            or abs(previous.yellow_x - observation.yellow_x)
+            > _YELLOW_JUMP_THRESHOLD
+        ):
             pending = self._pending_jump
             if pending is None or not _same_location(pending, observation):
                 self._pending_jump = observation
