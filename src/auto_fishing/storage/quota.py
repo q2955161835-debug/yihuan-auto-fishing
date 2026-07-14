@@ -34,7 +34,10 @@ class StorageQuotaManager:
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
             self._known_total = self._tree_bytes(self.root)
-            self._enforce(protect_newest=True)
+            self._enforce(
+                protect_newest=True,
+                total=self._known_total,
+            )
 
     def register_write(
         self,
@@ -58,23 +61,32 @@ class StorageQuotaManager:
             if self._known_total > self.max_bytes:
                 self._enforce(protect_newest=False)
 
-    def _enforce(self, *, protect_newest: bool) -> None:
-        total = self._tree_bytes(self.root)
+    def _enforce(
+        self,
+        *,
+        protect_newest: bool,
+        total: int | None = None,
+    ) -> None:
+        if total is None:
+            total = self._tree_bytes(self.root)
         if total <= self.max_bytes:
             self._known_total = total
             return
         active_run = self._effective_active_run(protect_newest)
         active_events = self._effective_events(active_run)
         for run in self._completed_runs(active_run):
+            removed_bytes = self._tree_bytes(run)
             shutil.rmtree(self._inside(run))
-            total = self._tree_bytes(self.root)
+            total -= removed_bytes
             if total <= self.max_bytes:
                 self._known_total = total
                 return
         for files in self._diagnostic_groups():
             for path in files:
-                self._inside(path).unlink(missing_ok=True)
-            total = self._tree_bytes(self.root)
+                resolved = self._inside(path)
+                removed_bytes = resolved.stat().st_size
+                resolved.unlink()
+                total -= removed_bytes
             if total <= self.max_bytes:
                 self._known_total = total
                 return
@@ -82,15 +94,17 @@ class StorageQuotaManager:
             frames = active_run / "frames"
             if frames.is_dir():
                 for path in sorted(frames.glob("*.jpg")):
-                    self._inside(path).unlink(missing_ok=True)
-                    total = self._tree_bytes(self.root)
+                    resolved = self._inside(path)
+                    removed_bytes = resolved.stat().st_size
+                    resolved.unlink()
+                    total -= removed_bytes
                     if total <= self.max_bytes:
                         self._known_total = total
                         return
         if active_events is not None and active_events.is_file():
             other_bytes = total - active_events.stat().st_size
             self._trim_events(active_events, self.max_bytes - other_bytes)
-            total = self._tree_bytes(self.root)
+            total = other_bytes + active_events.stat().st_size
         self._known_total = total
         if total > self.max_bytes:
             raise StorageQuotaError(

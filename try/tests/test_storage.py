@@ -71,6 +71,37 @@ def test_quota_keeps_recent_frames_from_newest_run(tmp_path):
     assert events.is_file()
 
 
+def test_quota_initialization_scans_data_root_only_once_when_pruning_many_frames(
+    tmp_path,
+):
+    class CountingQuota(StorageQuotaManager):
+        def __init__(self, *args, **kwargs):
+            self.root_scan_count = 0
+            super().__init__(*args, **kwargs)
+
+        def _tree_bytes(self, root):
+            if root.resolve() == self.root:
+                self.root_scan_count += 1
+            return super()._tree_bytes(root)
+
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    events = root / "runs" / "run-new" / "events.jsonl"
+    write_sized(events, 5, 2)
+    for index in range(40):
+        write_sized(
+            events.parent / "frames" / f"{index:08d}.jpg",
+            10,
+            3 + index,
+        )
+    quota = CountingQuota(root, max_bytes=100)
+
+    quota.initialize()
+
+    assert tree_bytes(root) <= 100
+    assert quota.root_scan_count == 1
+
+
 def test_quota_trims_old_event_lines_and_keeps_latest_complete_line(tmp_path):
     root = tmp_path / "data"
     write_sized(root / "config.json", 5, 1)
