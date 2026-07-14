@@ -188,6 +188,8 @@ Expected: `SMOKE_OK`。
 
 - [ ] **Step 5: Merge and publish**
 
+本地合并、合并后全量测试、工作树和任务分支清理已完成；私有 GitHub 推送等待用户确认。
+
 确认分支干净后合并到 `main`，再次运行全量测试，删除任务分支并推送 `origin/main`；最后核对本地与远端提交一致。
 
 ## Self-Review
