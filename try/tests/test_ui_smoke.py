@@ -199,6 +199,23 @@ def test_window_geometry_leaves_room_for_right_side_status(root) -> None:
     assert requested == ["400x240+20+20"]
 
 
+def test_window_geometry_uses_injected_visible_position_clamp(root) -> None:
+    requested: list[str] = []
+    original_geometry = root.geometry
+    root.geometry = lambda value: requested.append(value)  # type: ignore[method-assign]
+    try:
+        MainWindow(
+            root,
+            FakeController(),
+            FakeSettings(AppSettings(window_x=5000, window_y=5000)),
+            position_clamper=lambda x, y, width, height: (1520, 800),
+        )
+    finally:
+        root.geometry = original_geometry  # type: ignore[method-assign]
+
+    assert requested == ["400x240+1520+800"]
+
+
 def test_binding_callbacks_update_visible_status(root) -> None:
     root.withdraw()
     controller = FakeController()

@@ -617,17 +617,17 @@ git commit -m "feat: add automatic and manual error reports"
 @pytest.mark.parametrize(
     ("monitor", "game", "expected_width"),
     [
-        (Rect(0, 0, 1280, 720), Rect(0, 0, 1280, 720), 1139),
+        (Rect(0, 0, 1280, 720), Rect(0, 0, 1280, 720), 1075),
         (Rect(0, 0, 1920, 1080), Rect(0, 0, 1920, 1080), 1365),
         (Rect(0, 0, 2560, 1440), Rect(0, 0, 2560, 1440), 1707),
-        (Rect(-1280, 0, 0, 720), Rect(-1280, 0, 0, 720), 1139),
+        (Rect(-1280, 0, 0, 720), Rect(-1280, 0, 0, 720), 1075),
     ],
 )
 def test_keyboard_target_width_leaves_ready_roi_visible(monitor, game, expected_width):
     assert _target_outer_width(monitor, game) == expected_width
 ```
 
-The 1280 expectation is `READY_ROI.to_pixels(game).left - monitor.left`; the final real geometry must still pass the existing minimum client and aspect checks.
+The 1280 expectation is `READY_ROI.to_pixels(game).left - monitor.left = round(1280 * 0.84) = 1075`; the final real geometry must still pass the existing minimum client and aspect checks.
 
 - [ ] **Step 2: Write failing DPI fallback, manifest and placement tests**
 

@@ -21,10 +21,14 @@ def test_manifest_requests_administrator_and_per_monitor_v2_dpi():
     dpi_awareness = next(
         element for element in root.iter() if element.tag.endswith("dpiAwareness")
     )
+    dpi_aware = next(
+        element for element in root.iter() if element.tag.endswith("dpiAware")
+    )
 
     assert execution_level.attrib["level"] == "requireAdministrator"
     assert execution_level.attrib["uiAccess"] == "false"
     assert dpi_awareness.text == "PerMonitorV2"
+    assert dpi_aware.text == "true/pm"
 
 
 def test_pyinstaller_spec_builds_single_windowed_executable():
@@ -84,9 +88,33 @@ def test_release_verifier_accepts_administrator_manifest() -> None:
       <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security>
         <requestedPrivileges><requestedExecutionLevel level="requireAdministrator" uiAccess="false"/></requestedPrivileges>
       </security></trustInfo>
+      <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings>
+        <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+        <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      </windowsSettings></application>
     </assembly>'''
 
     module.validate_manifest(administrator)
+
+
+def test_release_verifier_rejects_manifest_without_legacy_dpi_fallback() -> None:
+    verifier_path = ROOT / "scripts" / "verify_release.py"
+    spec = importlib.util.spec_from_file_location("verify_release_dpi", verifier_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    missing_fallback = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+      <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security>
+        <requestedPrivileges><requestedExecutionLevel level="requireAdministrator" uiAccess="false"/></requestedPrivileges>
+      </security></trustInfo>
+      <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings>
+        <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      </windowsSettings></application>
+    </assembly>'''
+
+    with pytest.raises(RuntimeError, match="true/pm"):
+        module.validate_manifest(missing_fallback)
 
 
 def test_build_script_accepts_python_override_and_keeps_project_venv_default():

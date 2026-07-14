@@ -23,6 +23,7 @@ class MainWindow:
         *,
         window_title: str = "异环自动钓鱼",
         diagnostics_enabled: bool = False,
+        position_clamper: Any | None = None,
     ) -> None:
         self.root = root
         self.controller = controller
@@ -39,9 +40,18 @@ class MainWindow:
 
         root.title(window_title)
         window_height = 300 if diagnostics_enabled else _WINDOW_HEIGHT
+        window_x = self.settings.window_x
+        window_y = self.settings.window_y
+        if position_clamper is not None:
+            window_x, window_y = position_clamper(
+                window_x,
+                window_y,
+                _WINDOW_WIDTH,
+                window_height,
+            )
         root.geometry(
             f"{_WINDOW_WIDTH}x{window_height}"
-            f"{self.settings.window_x:+d}{self.settings.window_y:+d}"
+            f"{window_x:+d}{window_y:+d}"
         )
         root.minsize(_WINDOW_WIDTH, window_height)
         root.attributes("-topmost", True)

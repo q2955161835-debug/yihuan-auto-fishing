@@ -588,6 +588,9 @@ class Application:
                         "diagnostics_enabled": (
                             services.diagnostic_reporter is not None
                         ),
+                        "position_clamper": (
+                            services.window_service.clamp_window_position
+                        ),
                     }
                     if self._main_window_factory is MainWindow
                     else {}

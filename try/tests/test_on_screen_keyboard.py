@@ -16,11 +16,29 @@ from auto_fishing.platform.on_screen_keyboard import (
     OnScreenKeyboardPositionDenied,
     OnScreenKeyboardWindow,
     Win32KeyboardApi,
+    _target_outer_width,
 )
 
 
 MONITOR = Rect(0, 0, 1920, 1080)
 GAME_CLIENT = Rect(0, 0, 1920, 1080)
+
+
+@pytest.mark.parametrize(
+    ("monitor", "game", "expected_width"),
+    [
+        (Rect(0, 0, 1280, 720), Rect(0, 0, 1280, 720), 1075),
+        (Rect(0, 0, 1920, 1080), Rect(0, 0, 1920, 1080), 1365),
+        (Rect(0, 0, 2560, 1440), Rect(0, 0, 2560, 1440), 1707),
+        (Rect(-1280, 0, 0, 720), Rect(-1280, 0, 0, 720), 1075),
+    ],
+)
+def test_keyboard_target_width_leaves_ready_roi_visible(
+    monitor: Rect,
+    game: Rect,
+    expected_width: int,
+) -> None:
+    assert _target_outer_width(monitor, game) == expected_width
 
 
 class CallableSlot:
