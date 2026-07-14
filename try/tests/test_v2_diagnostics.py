@@ -185,9 +185,20 @@ def _populated_recorder() -> MemoryDiagnosticRecorder:
         now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
     )
     recorder.event("test.event", value=1)
+    recorder.event(
+        "progress.control",
+        frame_timestamp=1.0,
+        direction="left",
+        instantaneous_error=0.5,
+        weighted_error=0.4,
+    )
+    diagnostics = ProgressRecognizer().analyze(
+        np.zeros((120, 300, 3), dtype=np.uint8),
+        1.0,
+    ).diagnostics
     recorder.record_frame(
         np.zeros((720, 1280, 3), dtype=np.uint8),
-        observation=SceneObservation(),
+        observation=SceneObservation(progress_diagnostics=diagnostics),
         state_before=FishingState.CONTROL,
         snapshot=RuntimeSnapshot(FishingState.CONTROL, 0, 1, 30.0),
         frame_timestamp=1.0,
@@ -203,6 +214,12 @@ def test_bundle_contains_metadata_events_frames_and_error_image(tmp_path) -> Non
         version="2.0.0",
         now=lambda: datetime(2026, 7, 14, tzinfo=timezone.utc),
         system_info=lambda: {"windows": "test"},
+        executable_info=lambda: {
+            "frozen": True,
+            "executable_name": "app.exe",
+            "executable_size": 1,
+            "executable_sha256": "abc123",
+        },
     )
 
     result = service.request_report(
@@ -219,14 +236,35 @@ def test_bundle_contains_metadata_events_frames_and_error_image(tmp_path) -> Non
     assert result.path is not None
     with ZipFile(result.path) as archive:
         names = set(archive.namelist())
-        assert {"error.json", "events.jsonl", "error.jpg"} <= names
+        assert {
+            "error.json",
+            "events.jsonl",
+            "progress/trace.jsonl",
+            "error.jpg",
+        } <= names
         assert any(name.startswith("frames/") for name in names)
+        assert any(name.startswith("progress/frames/") for name in names)
         metadata = json.loads(archive.read("error.json"))
+        assert metadata["diagnostic_schema_version"] == 2
         assert metadata["version"] == "2.0.0"
         assert metadata["code"] == "E_VISION"
         assert metadata["screenshot_available"] is True
         assert metadata["client_rect"] == [0, 0, 1920, 1080]
+        assert metadata["coverage"]["events"]["count"] == 3
+        assert metadata["coverage"]["progress_traces"]["count"] == 1
+        assert metadata["diagnostic_drop_counts"] == {
+            "context_frames": 0,
+            "progress_frames": 0,
+            "progress_traces": 0,
+        }
+        assert metadata["frozen"] is True
+        assert metadata["executable_name"] == "app.exe"
+        assert metadata["executable_size"] == 1
+        assert metadata["executable_sha256"] == "abc123"
+        assert metadata["recent_control"]["frame_timestamp"] == 1.0
+        assert metadata["recent_control"]["direction"] == "left"
         assert b'"event":"test.event"' in archive.read("events.jsonl")
+        assert b'"frame_index":1' in archive.read("progress/trace.jsonl")
 
 
 def test_report_snapshot_and_frame_are_frozen_when_requested(tmp_path) -> None:
@@ -324,6 +362,111 @@ def test_bundle_retains_only_five_matching_zip_files(tmp_path) -> None:
     assert len(list(root.glob("yihuan-v2-*.zip"))) == 5
     assert unrelated.exists()
     assert list(root.glob("*.tmp")) == []
+
+
+def test_executable_hash_failure_is_metadata_not_bundle_failure(tmp_path) -> None:
+    def fail_executable_info():
+        raise OSError("无法读取发布物")
+
+    service = DiagnosticBundleService(
+        tmp_path / "diagnostics",
+        recorder=MemoryDiagnosticRecorder(),
+        version="2.0.0",
+        system_info=lambda: {},
+        executable_info=fail_executable_info,
+    )
+
+    result = service.request_report(
+        report_type="automatic",
+        code="E_VISION",
+        detail="识别失败",
+        state="已暂停",
+        frame=None,
+        context={},
+    ).result(timeout=5)
+    service.close()
+
+    assert result.error is None
+    assert result.path is not None
+    with ZipFile(result.path) as archive:
+        metadata = json.loads(archive.read("error.json"))
+        assert metadata["executable_hash_error"] == "无法读取发布物"
+
+
+def test_manual_report_coalesces_adjacent_automatic_window_report(tmp_path) -> None:
+    clock = [0.0]
+    root = tmp_path / "diagnostics"
+    service = DiagnosticBundleService(
+        root,
+        recorder=MemoryDiagnosticRecorder(clock=lambda: clock[0]),
+        version="2.0.0",
+        system_info=lambda: {},
+        executable_info=lambda: {"frozen": False},
+        clock=lambda: clock[0],
+    )
+    automatic = service.request_report(
+        report_type="automatic",
+        code="E_WINDOW",
+        detail="窗口失去前台",
+        state="已暂停",
+        frame=None,
+        context={},
+    ).result(timeout=5)
+    clock[0] = 0.5
+    manual = service.request_report(
+        report_type="manual_report",
+        code="MANUAL_REPORT",
+        detail="用户主动报告错误",
+        state="已暂停",
+        frame=None,
+        context={},
+    ).result(timeout=5)
+    service.close()
+
+    assert automatic.path is not None
+    assert manual.path is not None
+    assert not automatic.path.exists()
+    assert manual.path.exists()
+    assert list(root.glob("*.zip")) == [manual.path]
+
+
+def test_failed_manual_report_preserves_adjacent_automatic_window_report(
+    tmp_path,
+) -> None:
+    clock = [0.0]
+    root = tmp_path / "diagnostics"
+    service = DiagnosticBundleService(
+        root,
+        recorder=MemoryDiagnosticRecorder(clock=lambda: clock[0]),
+        version="2.0.0",
+        system_info=lambda: {},
+        executable_info=lambda: {"frozen": False},
+        clock=lambda: clock[0],
+    )
+    automatic = service.request_report(
+        report_type="automatic",
+        code="E_WINDOW",
+        detail="窗口失去前台",
+        state="已暂停",
+        frame=None,
+        context={},
+    ).result(timeout=5)
+    clock[0] = 0.5
+    manual = service.request_report(
+        report_type="manual_report",
+        code="MANUAL_REPORT",
+        detail="用户主动报告错误",
+        state="已暂停",
+        frame=np.empty((0, 0, 3), dtype=np.uint8),
+        context={},
+    ).result(timeout=5)
+    service.close()
+
+    assert automatic.path is not None
+    assert automatic.path.exists()
+    assert manual.path is None
+    assert manual.error
+    assert list(root.glob("*.zip")) == [automatic.path]
 
 
 def test_open_location_selects_existing_zip_and_rejects_missing(tmp_path) -> None:
