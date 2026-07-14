@@ -58,7 +58,10 @@ class StorageQuotaManager:
             current_size = resolved.stat().st_size if resolved.is_file() else 0
             self._known_total += current_size - max(0, previous_size)
             if self._known_total > self.max_bytes:
-                self._enforce(protect_newest=False)
+                self._enforce(
+                    protect_newest=False,
+                    total=self._known_total,
+                )
 
     def _enforce(
         self,

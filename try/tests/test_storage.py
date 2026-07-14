@@ -133,6 +133,42 @@ def test_quota_initialization_scans_data_root_only_once_when_pruning_many_frames
     assert quota.root_scan_count == 1
 
 
+def test_active_writes_reuse_capacity_ledger_without_rescanning_data_root(
+    tmp_path,
+):
+    class CountingQuota(StorageQuotaManager):
+        def __init__(self, *args, **kwargs):
+            self.root_scan_count = 0
+            super().__init__(*args, **kwargs)
+
+        def _tree_bytes(self, root):
+            if root.resolve() == self.root:
+                self.root_scan_count += 1
+            return super()._tree_bytes(root)
+
+    root = tmp_path / "data"
+    old_frames = root / "runs" / "run-old" / "frames"
+    for index in range(4):
+        write_sized(old_frames / f"{index:08d}.jpg", 10, index + 1)
+    write_sized(root / "config.json", 5, 10)
+    quota = CountingQuota(root, max_bytes=50)
+    quota.initialize()
+    active_run = root / "runs" / "run-active"
+
+    for index in range(2):
+        frame_path = active_run / "frames" / f"{index:08d}.jpg"
+        write_sized(frame_path, 10, 20 + index)
+        quota.register_write(
+            frame_path,
+            0,
+            active_run=active_run,
+            active_events=active_run / "events.jsonl",
+        )
+
+    assert quota.root_scan_count == 1
+    assert quota.total_bytes <= 50
+
+
 def test_quota_trims_old_event_lines_and_keeps_latest_complete_line(tmp_path):
     root = tmp_path / "data"
     write_sized(root / "config.json", 5, 1)
