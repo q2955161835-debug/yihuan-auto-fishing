@@ -10,6 +10,7 @@ htmlcov/
 .superpowers/
 build/
 dist/
+/异环自动钓鱼.exe
 logs/
 diagnostics/
 try/generated/

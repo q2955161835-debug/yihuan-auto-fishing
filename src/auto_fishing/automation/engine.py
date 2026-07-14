@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from random import uniform as real_uniform
 from typing import Any
 
 import numpy as np
@@ -20,6 +23,15 @@ from auto_fishing.model import (
     RuntimeSnapshot,
     SceneObservation,
 )
+from auto_fishing.storage.runtime_logging import RuntimeLogError
+from auto_fishing.vision.geometry import crop_normalized
+from auto_fishing.vision.regions import TOP_ROI
+
+
+_RESULT_CLICK_DELAY_MIN = 3.10
+_RESULT_CLICK_DELAY_MAX = 3.60
+_STRUCTURED_PROGRESS_LOSS_LIMIT = 60
+_BLANK_PROGRESS_LOSS_LIMIT = 60
 
 
 class InputActionError(RuntimeError):
@@ -38,6 +50,10 @@ class CaptureActionError(RuntimeError):
     """The capture source failed while changing outputs."""
 
 
+class OnScreenKeyboardActionError(RuntimeError):
+    """The Windows on-screen keyboard cannot safely provide input."""
+
+
 class AutomationCore:
     """Thread-independent fishing decisions built on the formal state machine."""
 
@@ -48,13 +64,19 @@ class AutomationCore:
         controller: Any,
         input_service: Any,
         scene_recognizer: Any,
+        random_uniform: Callable[[float, float], float] = real_uniform,
+        event_recorder: Any | None = None,
     ) -> None:
         self.state_machine = state_machine
         self.controller = controller
         self.input_service = input_service
         self.scene_recognizer = scene_recognizer
-        self.bar_missing_frames = 0
-        self.result_candidate_frames = 0
+        self.random_uniform = random_uniform
+        self.event_recorder = event_recorder
+        self.structured_missing_frames = 0
+        self.blank_missing_frames = 0
+        self.bar_valid_frames = 0
+        self.result_next_click_at: float | None = None
         self.pause_code = ""
         self._error = ""
         self._fps = 0.0
@@ -75,8 +97,9 @@ class AutomationCore:
     def start(self, target: int, now: float) -> None:
         with self._lock:
             self.state_machine.start(target, now)
-            self.bar_missing_frames = 0
-            self.result_candidate_frames = 0
+            self._reset_progress_tracking()
+            self.bar_valid_frames = 0
+            self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
             self._fps = 0.0
@@ -135,18 +158,25 @@ class AutomationCore:
             if self.state_machine.state is not FishingState.PAUSED:
                 return False
             event = None
-            if observation.progress is not None:
-                event = Event.RESUME_CONTROL
-            elif observation.result:
+            if self.state_machine.paused_from is FishingState.WAIT_RESULT:
                 event = Event.RESUME_RESULT
+            elif observation.progress is not None:
+                event = Event.RESUME_CONTROL
             elif observation.ready:
                 event = Event.RESUME_READY
             if event is None:
                 return False
 
             self.state_machine.handle(event, now)
-            self.bar_missing_frames = 0
-            self.result_candidate_frames = 0
+            self._reset_progress_tracking()
+            self.bar_valid_frames = 0
+            self._reset_result_dismissal()
+            if self.state_machine.state is FishingState.WAIT_RESULT:
+                self._schedule_result_click(
+                    now,
+                    _RESULT_CLICK_DELAY_MIN,
+                    _RESULT_CLICK_DELAY_MAX,
+                )
             self.pause_code = ""
             self._error = ""
             self._input_blocked.clear()
@@ -160,8 +190,9 @@ class AutomationCore:
             except Exception as error:
                 raise InputActionError(str(error)) from error
             self.state_machine.cancel_current(now)
-            self.bar_missing_frames = 0
-            self.result_candidate_frames = 0
+            self._reset_progress_tracking()
+            self.bar_valid_frames = 0
+            self._reset_result_dismissal()
             self.pause_code = ""
             self._error = ""
             self._fps = 0.0
@@ -225,11 +256,8 @@ class AutomationCore:
             self.state_machine.handle(Event.BAR_DETECTED, now)
         elif state is FishingState.CONTROL:
             self._control(observation, now)
-        elif state is FishingState.WAIT_RESULT and observation.result:
-            self._input(self.input_service.release_all)
-            self.state_machine.handle(Event.RESULT_DETECTED, now)
-        elif state is FishingState.DISMISS_RESULT:
-            self._dismiss_result(observation, now, client_rect)
+        elif state is FishingState.WAIT_RESULT:
+            self._click_result_after_delay(now, client_rect)
         elif (
             state is FishingState.INTER_ROUND
             and self.state_machine.check_interval(now)
@@ -249,46 +277,156 @@ class AutomationCore:
 
     def _control(self, observation: SceneObservation, now: float) -> None:
         if observation.progress is not None:
-            self.bar_missing_frames = 0
-            self.result_candidate_frames = 0
+            self._reset_progress_tracking()
+            self.bar_valid_frames += 1
             direction = self.controller.decide(observation.progress)
+            self._record(
+                "progress.control",
+                direction=direction.value,
+                sample_count=self.controller.sample_count,
+                weighted_error=self.controller.weighted_error,
+                confidence=observation.progress.confidence,
+            )
             self._input(lambda: self.input_service.set_direction(direction))
             return
 
-        self.bar_missing_frames += 1
-        self.result_candidate_frames = (
-            self.result_candidate_frames + 1
-            if observation.result_candidate
-            else 0
-        )
+        self.controller.decide(None)
         self._input(self.input_service.release_all)
-        if observation.result_candidate:
-            if self.result_candidate_frames >= 2:
-                self.state_machine.handle(Event.BAR_GONE, now)
+        has_structure = (
+            observation.progress_scanlines > 0
+            or observation.progress_candidates > 0
+        )
+        if has_structure:
+            self.structured_missing_frames += 1
+            self.blank_missing_frames = 0
+            if (
+                self.structured_missing_frames
+                >= _STRUCTURED_PROGRESS_LOSS_LIMIT
+            ):
+                self.pause(
+                    "连续六十帧进度条结构不稳定",
+                    now,
+                    code="E_PROGRESS_LOST",
+                )
             return
-        if self.bar_missing_frames >= 6:
+
+        self.blank_missing_frames += 1
+        self.structured_missing_frames = 0
+        clean_disappearance = (
+            observation.progress_scanlines == 0
+            and observation.progress_candidates == 0
+            and observation.progress_rejection == "yellow_missing"
+        )
+        if (
+            self.bar_valid_frames >= 15
+            and self.blank_missing_frames >= 3
+            and clean_disappearance
+        ):
+            self.bar_valid_frames = 0
+            self._enter_wait_result(now)
+            return
+        if self.blank_missing_frames >= _BLANK_PROGRESS_LOSS_LIMIT:
             self.pause(
-                "连续六帧未识别进度条",
+                "连续六十帧未识别进度条",
                 now,
                 code="E_PROGRESS_LOST",
             )
 
-    def _dismiss_result(
+    def _enter_wait_result(self, now: float) -> None:
+        self.state_machine.handle(Event.BAR_GONE, now)
+        self._reset_result_dismissal()
+        self._schedule_result_click(
+            now,
+            _RESULT_CLICK_DELAY_MIN,
+            _RESULT_CLICK_DELAY_MAX,
+        )
+
+    def _click_result_after_delay(
         self,
-        observation: SceneObservation,
         now: float,
         client_rect: Rect | None,
     ) -> None:
-        if not self.state_machine.result_clicked:
-            if not observation.result or client_rect is None:
-                return
-            x = client_rect.left + round(client_rect.width * 0.15)
-            y = client_rect.top + round(client_rect.height * 0.55)
-            self._input(lambda: self.input_service.click(x, y))
-            self.state_machine.handle(Event.RESULT_CLICKED, now)
+        if self.result_next_click_at is None:
+            self._schedule_result_click(
+                now,
+                _RESULT_CLICK_DELAY_MIN,
+                _RESULT_CLICK_DELAY_MAX,
+            )
             return
-        if observation.ready:
-            self.state_machine.handle(Event.READY_DETECTED, now)
+        if now < self.result_next_click_at:
+            return
+        if client_rect is None:
+            return
+
+        point = self._result_click_point(client_rect)
+        if point is None:
+            self.pause(
+                "Windows 屏幕键盘遮挡全部结算安全点击点",
+                now,
+                code="E_OSK",
+            )
+            return
+        x, y = point
+        self._record(
+            "result.dismiss_attempt",
+            attempt=1,
+            x=x,
+            y=y,
+            trigger="timer_elapsed",
+        )
+        self._input(lambda: self.input_service.click(x, y))
+        self._record(
+            "result.dismiss_confirmed",
+            attempts=1,
+            signal="click_succeeded",
+        )
+        self.state_machine.handle(Event.RESULT_CLICKED, now)
+        self._reset_result_dismissal()
+
+    def _schedule_result_click(
+        self,
+        now: float,
+        minimum: float,
+        maximum: float,
+    ) -> None:
+        delay = float(self.random_uniform(minimum, maximum))
+        if not math.isfinite(delay):
+            raise ValueError("结算点击随机延迟必须为有限数")
+        delay = min(maximum, max(minimum, delay))
+        self.result_next_click_at = now + delay
+        self._record(
+            "result.dismiss_scheduled",
+            attempt=1,
+            delay=delay,
+            scheduled_at=self.result_next_click_at,
+        )
+
+    def _result_click_point(self, client_rect: Rect) -> tuple[int, int] | None:
+        occlusion = self.input_service.occlusion_rect()
+        for horizontal, vertical in (
+            (0.80, 0.55),
+            (0.85, 0.45),
+            (0.70, 0.35),
+        ):
+            x = client_rect.left + round(client_rect.width * horizontal)
+            y = client_rect.top + round(client_rect.height * vertical)
+            if occlusion is None or not (
+                occlusion.left <= x < occlusion.right
+                and occlusion.top <= y < occlusion.bottom
+            ):
+                return x, y
+        return None
+
+    def _reset_result_dismissal(self) -> None:
+        self.result_next_click_at = None
+
+    def _reset_progress_tracking(self) -> None:
+        self.structured_missing_frames = 0
+        self.blank_missing_frames = 0
+
+    def _record(self, name: str, **fields: object) -> None:
+        if self.event_recorder is not None:
+            self.event_recorder.event(name, **fields)
 
 
 class AutomationEngine:
@@ -302,6 +440,7 @@ class AutomationEngine:
         frame_source: Any,
         scene_recognizer: Any,
         diagnostics: Any,
+        runtime_log: Any | None = None,
         clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -310,6 +449,7 @@ class AutomationEngine:
         self.frame_source = frame_source
         self.scene_recognizer = scene_recognizer
         self.diagnostics = diagnostics
+        self.runtime_log = runtime_log
         self.clock = clock
         self.logger = logger or logging.getLogger(__name__)
         self._bound: Any | None = None
@@ -340,7 +480,9 @@ class AutomationEngine:
         self._pause_lock = threading.RLock()
         self._diagnostic_recorded = False
         self._last_frame: np.ndarray | None = None
+        self._progress_frames: deque[np.ndarray] = deque(maxlen=12)
         self._last_refresh = float("-inf")
+        self._last_logged_status: tuple[str, int, int, str] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -354,9 +496,22 @@ class AutomationEngine:
         with self._lifecycle_lock:
             if self.is_running or self._starting or self._cancelling:
                 raise RuntimeError("自动化运行中不能更换绑定窗口")
+            try:
+                self.core.input_service.prepare(
+                    bound.monitor_rect,
+                    bound.client_rect,
+                )
+            except Exception as error:
+                raise RuntimeError(f"屏幕键盘准备失败: {error}") from error
             self._bound = bound
+        self._runtime_event(
+            "automation.bound",
+            title=getattr(bound, "title", ""),
+            device_index=getattr(bound, "device_index", None),
+            output_index=getattr(bound, "output_index", None),
+        )
 
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         with self._lifecycle_lock:
             if self._bound is None:
                 raise RuntimeError("请先绑定游戏窗口")
@@ -366,12 +521,15 @@ class AutomationEngine:
                 raise RuntimeError("自动化仍在关闭中")
             bound = self._bound
 
+        if activate:
+            self._activate_bound(bound)
         try:
             foreground = bool(self.window_service.is_foreground(bound))
         except Exception as error:
             raise RuntimeError(f"无法确认游戏窗口前台状态: {error}") from error
         if not foreground:
             raise RuntimeError("请在倒计时结束前切回已绑定的游戏窗口")
+        self._runtime_event("automation.start_requested", target=target)
 
         with self._lifecycle_lock:
             if self._bound is not bound:
@@ -401,7 +559,9 @@ class AutomationEngine:
                 start_epoch = self._pause_epoch
             self._diagnostic_recorded = False
             self._last_frame = None
+            self._progress_frames.clear()
             self._last_refresh = float("-inf")
+            self._last_logged_status = None
 
         publish_done = threading.Event()
         core_started = False
@@ -569,7 +729,7 @@ class AutomationEngine:
         )
         self._pause("E_USER_PAUSE", reason, frame)
 
-    def resume(self) -> None:
+    def resume(self, *, activate: bool = False) -> None:
         with self._pause_lock:
             requested_epoch = self._pause_epoch
             if self._closing or self._start_allowed is not True:
@@ -577,8 +737,10 @@ class AutomationEngine:
         snapshot = self.core.snapshot
         if snapshot.state is not FishingState.PAUSED:
             return
+        bound = self._require_bound()
+        if activate:
+            self._activate_bound(bound)
         try:
-            bound = self._require_bound()
             foreground = bool(self.window_service.is_foreground(bound))
         except Exception as error:
             detail = f"无法确认游戏窗口前台状态: {error}"
@@ -606,6 +768,7 @@ class AutomationEngine:
                 and snapshot.state is FishingState.PAUSED
             ):
                 self._resume_request = requested_epoch
+        self._runtime_event("automation.resume_requested")
 
     def cancel_current(self) -> None:
         deadline = time.monotonic() + 2.0
@@ -644,6 +807,7 @@ class AutomationEngine:
             self.core.cancel_current(self.clock())
             self._diagnostic_recorded = False
             self._last_frame = None
+            self._progress_frames.clear()
             self._last_refresh = float("-inf")
             self._publish()
         finally:
@@ -699,6 +863,16 @@ class AutomationEngine:
                 ) = self._read_pause_gate()
                 if paused_without_request:
                     self._shutdown_event.wait(0.005)
+                    continue
+                try:
+                    self._raise_if_runtime_log_failed()
+                except RuntimeLogError as error:
+                    self._pause(
+                        "E_LOGGING",
+                        str(error),
+                        self._last_frame,
+                        expected_epoch=operation_epoch,
+                    )
                     continue
                 try:
                     packet = self.frame_source.latest()
@@ -762,6 +936,15 @@ class AutomationEngine:
                     )
                     self._shutdown_event.wait(0.005)
                     continue
+                except OnScreenKeyboardActionError as error:
+                    self._pause(
+                        "E_OSK",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
                 except Exception as error:
                     self._pause(
                         "E_WINDOW",
@@ -776,8 +959,33 @@ class AutomationEngine:
 
                 try:
                     client_frame = self._crop_client(packet.frame, bound)
+                except Exception as error:
+                    self._pause(
+                        "E_VISION",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
+
+                try:
+                    occlusion = self._client_occlusion(bound)
+                except Exception as error:
+                    self._pause(
+                        "E_OSK",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
+
+                try:
                     observation = self.scene_recognizer.observe(
-                        client_frame, packet.timestamp
+                        client_frame,
+                        packet.timestamp,
+                        occlusion=occlusion,
                     )
                 except Exception as error:
                     self._pause(
@@ -818,6 +1026,8 @@ class AutomationEngine:
                             now,
                             code="E_USER_PAUSE",
                         )
+                    if resumed:
+                        self._runtime_event("automation.resumed")
                     self._publish()
                     self._shutdown_event.wait(0.001)
                     continue
@@ -827,6 +1037,8 @@ class AutomationEngine:
                     timestamp=packet.timestamp,
                     fps=packet.fps,
                 )
+                state_before = self.core.snapshot.state
+                self._remember_progress_frame(client_frame, state_before)
                 try:
                     snapshot = self.core.process(
                         observation,
@@ -834,6 +1046,23 @@ class AutomationEngine:
                         now,
                         bound.client_rect,
                     )
+                    self._record_runtime_frame(
+                        client_frame,
+                        observation=observation,
+                        state_before=state_before,
+                        snapshot=snapshot,
+                        frame_timestamp=packet.timestamp,
+                        now_monotonic=now,
+                    )
+                    self._raise_if_runtime_log_failed()
+                except RuntimeLogError as error:
+                    self._pause(
+                        "E_LOGGING",
+                        str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    continue
                 except InputActionError as error:
                     self._pause(
                         "E_INPUT",
@@ -930,6 +1159,11 @@ class AutomationEngine:
         )
         actual_code = self.core.pause_code
         actual_detail = self.core.snapshot.error
+        self._runtime_event(
+            "automation.paused",
+            code=actual_code,
+            detail=actual_detail,
+        )
 
         save_diagnostic_now = False
         with self._pause_lock:
@@ -946,7 +1180,16 @@ class AutomationEngine:
                 save_diagnostic_now = True
         if save_diagnostic_now:
             try:
-                self.diagnostics.save(frame, actual_code, actual_detail)
+                self.diagnostics.save(
+                    frame,
+                    actual_code,
+                    actual_detail,
+                    progress_frames=(
+                        tuple(self._progress_frames)
+                        if actual_code == "E_PROGRESS_LOST"
+                        else ()
+                    ),
+                )
             except Exception as error:
                 self.logger.warning("保存诊断失败: %s", error)
         self._publish()
@@ -992,6 +1235,7 @@ class AutomationEngine:
         try:
             with self._capture_lock:
                 self.frame_source.stop()
+            self._runtime_event("capture.stopped")
         except Exception as error:
             self.logger.warning("停止截屏失败: %s", error)
 
@@ -1000,6 +1244,11 @@ class AutomationEngine:
             if self._stop_requested():
                 return False
             self.frame_source.start(device_index, output_index)
+            self._runtime_event(
+                "capture.started",
+                device_index=device_index,
+                output_index=output_index,
+            )
             return True
 
     def _stop_requested(self) -> bool:
@@ -1017,11 +1266,98 @@ class AutomationEngine:
 
     def _publish(self) -> None:
         snapshot = self.core.snapshot
+        status = (
+            snapshot.state.value,
+            snapshot.completed,
+            snapshot.target,
+            snapshot.error,
+        )
+        if status != self._last_logged_status:
+            self._last_logged_status = status
+            self._runtime_event(
+                "automation.status",
+                state=snapshot.state.value,
+                completed=snapshot.completed,
+                target=snapshot.target,
+                fps=snapshot.fps,
+                error=snapshot.error,
+                pause_code=self.core.pause_code,
+            )
         for callback in tuple(self._callbacks):
             try:
                 callback(snapshot)
             except Exception as error:
                 self.logger.warning("状态回调失败: %s", error)
+
+    def _record_runtime_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        observation: SceneObservation,
+        state_before: FishingState,
+        snapshot: RuntimeSnapshot,
+        frame_timestamp: float,
+        now_monotonic: float,
+    ) -> None:
+        if self.runtime_log is not None:
+            self.runtime_log.record_frame(
+                frame,
+                observation=observation,
+                state_before=state_before,
+                snapshot=snapshot,
+                frame_timestamp=frame_timestamp,
+                now_monotonic=now_monotonic,
+            )
+
+    def _remember_progress_frame(
+        self,
+        client_frame: np.ndarray,
+        state: FishingState,
+    ) -> None:
+        if state not in {FishingState.WAIT_BAR, FishingState.CONTROL}:
+            self._progress_frames.clear()
+            return
+        top = crop_normalized(client_frame, TOP_ROI)
+        height = top.shape[0]
+        band = top[round(height * 0.40) : round(height * 0.52)]
+        self._progress_frames.append(np.ascontiguousarray(band).copy())
+
+    def _raise_if_runtime_log_failed(self) -> None:
+        if self.runtime_log is not None:
+            self.runtime_log.raise_if_failed()
+
+    def _runtime_event(self, name: str, **fields: Any) -> None:
+        if self.runtime_log is None:
+            return
+        try:
+            self.runtime_log.event(name, **fields)
+        except Exception as error:
+            self.logger.warning("保存运行日志事件失败: %s", error)
+
+    def _activate_bound(self, bound: Any) -> None:
+        self._runtime_event(
+            "window.activation_requested",
+            hwnd=getattr(bound, "hwnd", None),
+        )
+        try:
+            activated = bool(self.window_service.activate(bound))
+            foreground = bool(self.window_service.is_foreground(bound))
+        except Exception as error:
+            self._runtime_event(
+                "window.activation_result",
+                success=False,
+                detail=str(error),
+            )
+            raise RuntimeError(
+                "自动切换到游戏失败，请关闭自动切回或手动切到游戏后重试"
+            ) from error
+
+        success = activated and foreground
+        self._runtime_event("window.activation_result", success=success)
+        if not success:
+            raise RuntimeError(
+                "自动切换到游戏失败，请关闭自动切回或手动切到游戏后重试"
+            )
 
     def _require_bound(self) -> Any:
         bound = self._bound
@@ -1039,6 +1375,19 @@ class AutomationEngine:
 
         refreshed = self.window_service.refresh(bound)
         self._last_refresh = now
+        if (
+            refreshed.monitor_rect != bound.monitor_rect
+            or refreshed.client_rect != bound.client_rect
+        ):
+            try:
+                self.core.input_service.prepare(
+                    refreshed.monitor_rect,
+                    refreshed.client_rect,
+                )
+            except Exception as error:
+                raise OnScreenKeyboardActionError(
+                    f"屏幕键盘重新定位失败: {error}"
+                ) from error
         if (
             refreshed.device_index != bound.device_index
             or refreshed.output_index != bound.output_index
@@ -1069,3 +1418,21 @@ class AutomationEngine:
         if not (0 <= left < right <= width and 0 <= top < bottom <= height):
             raise WindowActionError("客户区超出当前截屏边界")
         return frame[top:bottom, left:right].copy()
+
+    def _client_occlusion(self, bound: Any) -> Rect | None:
+        screen_rect = self.core.input_service.occlusion_rect()
+        if screen_rect is None:
+            return None
+        client = bound.client_rect
+        left = max(screen_rect.left, client.left)
+        top = max(screen_rect.top, client.top)
+        right = min(screen_rect.right, client.right)
+        bottom = min(screen_rect.bottom, client.bottom)
+        if left >= right or top >= bottom:
+            return None
+        return Rect(
+            left - client.left,
+            top - client.top,
+            right - client.left,
+            bottom - client.top,
+        )

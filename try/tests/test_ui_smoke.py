@@ -7,6 +7,7 @@ import tkinter as tk
 import pytest
 
 from auto_fishing.app import AppController, Application, ApplicationServices
+from auto_fishing.platform.on_screen_keyboard import OnScreenKeyboardInputBackend
 from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.storage.settings import AppSettings
 from auto_fishing.ui.main_window import MainWindow
@@ -16,6 +17,7 @@ class FakeController:
     def __init__(self) -> None:
         self.calls: list[object] = []
         self.bind_callbacks = None
+        self.bind_start_callbacks = None
         self.rebind_callbacks = None
         self.start_callbacks = None
         self.resume_callbacks = None
@@ -24,12 +26,20 @@ class FakeController:
         self.calls.append("bind")
         self.bind_callbacks = (on_tick, on_done)
 
+    def bind_and_start_after_countdown(
+        self, target, on_tick, on_done
+    ) -> None:
+        self.calls.append(("bind_and_start", target))
+        self.bind_start_callbacks = (on_tick, on_done)
+
     def rebind(self, on_tick, on_done) -> None:
         self.calls.append("rebind")
         self.rebind_callbacks = (on_tick, on_done)
 
-    def start(self, target: int) -> None:
-        self.calls.append(("start", target))
+    def start(self, target: int, *, activate: bool = False) -> None:
+        self.calls.append(
+            ("start", target, True) if activate else ("start", target)
+        )
 
     def start_after_countdown(self, target, on_tick, on_done) -> None:
         self.calls.append(("start_after_countdown", target))
@@ -38,8 +48,8 @@ class FakeController:
     def pause(self, reason: str = "按钮暂停") -> None:
         self.calls.append("pause")
 
-    def resume(self) -> None:
-        self.calls.append("resume")
+    def resume(self, *, activate: bool = False) -> None:
+        self.calls.append(("resume", True) if activate else "resume")
 
     def resume_after_countdown(self, on_tick, on_done) -> None:
         self.calls.append("resume_after_countdown")
@@ -87,7 +97,11 @@ def root(tk_master):
 def test_window_is_topmost_and_validates_count(root) -> None:
     root.withdraw()
     controller = FakeController()
-    window = MainWindow(root, controller, FakeSettings())
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
     root.update_idletasks()
     assert root.attributes("-topmost") == 1
 
@@ -99,9 +113,9 @@ def test_window_is_topmost_and_validates_count(root) -> None:
     window.on_start()
     assert controller.calls == []
 
-    window.on_bind()
-    assert controller.bind_callbacks is not None
-    _on_tick, on_done = controller.bind_callbacks
+    window.on_rebind()
+    assert controller.rebind_callbacks is not None
+    _on_tick, on_done = controller.rebind_callbacks
     on_done("异环", None)
     controller.calls.clear()
     window.on_start()
@@ -121,10 +135,14 @@ def test_window_is_topmost_and_validates_count(root) -> None:
 
 def test_successful_start_countdown_keeps_controls_locked_until_snapshot(root) -> None:
     controller = FakeController()
-    window = MainWindow(root, controller, FakeSettings())
-    window.on_bind()
-    assert controller.bind_callbacks is not None
-    _on_tick, on_bind_done = controller.bind_callbacks
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
+    window.on_rebind()
+    assert controller.rebind_callbacks is not None
+    _on_tick, on_bind_done = controller.rebind_callbacks
     on_bind_done("异环", None)
 
     window.on_start()
@@ -151,7 +169,20 @@ def test_window_geometry_supports_negative_monitor_coordinates(root) -> None:
     finally:
         root.geometry = original_geometry  # type: ignore[method-assign]
 
-    assert requested == ["320x240-1920+20"]
+    assert requested == ["400x240-1920+20"]
+
+
+def test_window_geometry_leaves_room_for_right_side_status(root) -> None:
+    controller = FakeController()
+    requested: list[str] = []
+    original_geometry = root.geometry
+    root.geometry = lambda value: requested.append(value)  # type: ignore[method-assign]
+    try:
+        MainWindow(root, controller, FakeSettings())
+    finally:
+        root.geometry = original_geometry  # type: ignore[method-assign]
+
+    assert requested == ["400x240+20+20"]
 
 
 def test_binding_callbacks_update_visible_status(root) -> None:
@@ -159,12 +190,12 @@ def test_binding_callbacks_update_visible_status(root) -> None:
     controller = FakeController()
     window = MainWindow(root, controller, FakeSettings())
     window.on_bind()
-    assert controller.calls == ["bind"]
+    assert controller.calls == [("bind_and_start", 1)]
     assert window.start_button.instate(["disabled"])
     window.on_start()
-    assert controller.calls == ["bind"]
-    assert controller.bind_callbacks is not None
-    on_tick, on_done = controller.bind_callbacks
+    assert controller.calls == [("bind_and_start", 1)]
+    assert controller.bind_start_callbacks is not None
+    on_tick, on_done = controller.bind_start_callbacks
 
     for seconds in (3, 2, 1):
         on_tick(seconds)
@@ -172,14 +203,70 @@ def test_binding_callbacks_update_visible_status(root) -> None:
     on_done("异环", None)
     assert window.binding_var.get() == "已绑定：异环"
 
-    window.on_rebind()
-    assert controller.calls[-1] == "rebind"
+    assert window.bind_button.instate(["disabled"])
+    assert window.rebind_button.instate(["disabled"])
+
+
+def test_bind_button_uses_one_countdown_then_marks_runtime_active(root) -> None:
+    controller = FakeController()
+    window = MainWindow(root, controller, FakeSettings())
+    window.count_var.set("2")
+
+    assert window.bind_button.cget("text") == "绑定并开始"
+    window.on_bind()
+
+    assert controller.calls == [("bind_and_start", 2)]
+    assert controller.bind_start_callbacks is not None
+    on_tick, on_done = controller.bind_start_callbacks
+    on_tick(3)
+    assert window.binding_var.get() == "绑定倒计时：3"
+    on_done("异环", None)
+
+    assert window.binding_var.get() == "已绑定：异环"
+    assert window.start_button.instate(["disabled"])
+    assert window.pause_button.instate(["!disabled"])
+
+
+def test_start_and_resume_use_explicit_activation_when_enabled(root) -> None:
+    controller = FakeController()
+    window = MainWindow(root, controller, FakeSettings())
+    window._has_binding = True
+    window._refresh_control_states()
+
+    window.on_start()
+    assert controller.calls[-1] == ("start", 1, True)
+
+    window.apply_snapshot(RuntimeSnapshot(FishingState.PAUSED, 0, 1, 30.0))
+    window.on_pause_or_resume()
+    assert controller.calls[-1] == ("resume", True)
+
+
+def test_start_and_resume_keep_manual_countdown_when_activation_disabled(
+    root,
+) -> None:
+    controller = FakeController()
+    settings = FakeSettings(AppSettings(auto_activate_game=False))
+    window = MainWindow(root, controller, settings)
+    window._has_binding = True
+    window._refresh_control_states()
+
+    window.on_start()
+    assert controller.calls[-1] == ("start_after_countdown", 1)
+
+    window._on_start_done("测试取消")
+    window.apply_snapshot(RuntimeSnapshot(FishingState.PAUSED, 0, 1, 30.0))
+    window.on_pause_or_resume()
+    assert controller.calls[-1] == "resume_after_countdown"
 
 
 def test_snapshot_is_queued_on_tk_thread_and_locks_runtime_controls(root) -> None:
     root.withdraw()
     controller = FakeController()
-    window = MainWindow(root, controller, FakeSettings())
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
     original_after = root.after
     scheduled: list[tuple[int, object]] = []
     root.after = lambda delay, callback: scheduled.append((delay, callback))  # type: ignore[method-assign]
@@ -270,6 +357,22 @@ def test_close_saves_position_and_shuts_down_controller(root) -> None:
     assert root.winfo_exists() == 0
 
 
+def test_auto_activate_setting_is_visible_and_saved(root) -> None:
+    root.withdraw()
+    controller = FakeController()
+    settings = FakeSettings(AppSettings(auto_activate_game=False))
+    window = MainWindow(root, controller, settings)
+
+    assert window.auto_activate_var.get() is False
+    assert window.auto_activate_check.cget("text") == "自动切回游戏"
+
+    window.auto_activate_var.set(True)
+    window.close()
+
+    assert settings.saved is not None
+    assert settings.saved.auto_activate_game is True
+
+
 class ManualScheduler:
     def __init__(self) -> None:
         self.delays: list[int] = []
@@ -310,14 +413,16 @@ class BridgeEngine:
     def bind(self, bound) -> None:
         self.calls.append(("bind", bound))
 
-    def start(self, target: int) -> None:
-        self.calls.append(("start", target))
+    def start(self, target: int, *, activate: bool = False) -> None:
+        self.calls.append(
+            ("start", target, True) if activate else ("start", target)
+        )
 
     def pause(self, reason: str) -> None:
         self.calls.append(("pause", reason))
 
-    def resume(self) -> None:
-        self.calls.append("resume")
+    def resume(self, *, activate: bool = False) -> None:
+        self.calls.append(("resume", True) if activate else "resume")
 
     def cancel_current(self) -> None:
         self.calls.append("cancel_current")
@@ -329,9 +434,9 @@ class BridgeEngine:
 
 
 class RunningStartEngine(BridgeEngine):
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         self.running = True
-        super().start(target)
+        super().start(target, activate=activate)
 
 
 class BlockingPauseEngine(BridgeEngine):
@@ -386,11 +491,11 @@ class BlockingStartEngine(BridgeEngine):
         self.allow_start = threading.Event()
         self.pause_entered = threading.Event()
 
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         self.start_entered.set()
         if not self.allow_start.wait(1.0):
             raise RuntimeError("test did not release start")
-        super().start(target)
+        super().start(target, activate=activate)
 
     def pause(self, reason: str) -> None:
         self.pause_entered.set()
@@ -456,6 +561,57 @@ def test_controller_counts_down_asynchronously_before_binding() -> None:
     assert window_service.calls == 1
     assert engine.calls == [("bind", window_service.bound)]
     assert completed == [("异环", None)]
+
+
+def test_controller_binds_and_starts_after_one_countdown() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    window_service = BindingService()
+    controller = AppController(engine, window_service, scheduler)
+    ticks: list[int] = []
+    completed: list[tuple[str | None, str | None]] = []
+
+    controller.bind_and_start_after_countdown(
+        2,
+        ticks.append,
+        lambda title, error: completed.append((title, error)),
+    )
+
+    assert ticks == [3]
+    for _ in range(3):
+        scheduler.run_next(1000)
+
+    assert window_service.calls == 1
+    assert engine.calls == [
+        ("bind", window_service.bound),
+        ("start", 2),
+    ]
+    assert completed == [("异环", None)]
+
+
+def test_f8_cancels_pending_bind_and_start_before_engine_calls() -> None:
+    scheduler = ManualScheduler()
+    engine = BridgeEngine()
+    window_service = BindingService()
+    controller = AppController(engine, window_service, scheduler)
+    controller.subscribe(lambda _snapshot: None)
+    completed: list[tuple[str | None, str | None]] = []
+
+    controller.bind_and_start_after_countdown(
+        2,
+        lambda _seconds: None,
+        lambda title, error: completed.append((title, error)),
+    )
+    controller.pause("F8 紧急暂停")
+    scheduler.run_next(10)
+    while 1000 in scheduler.pending_delays:
+        scheduler.run_next(1000)
+
+    assert completed == [
+        (None, "绑定并开始倒计时已被紧急暂停取消")
+    ]
+    assert window_service.calls == 0
+    assert not any(call == ("start", 2) for call in engine.calls)
 
 
 def test_controller_counts_down_before_starting_engine() -> None:
@@ -663,9 +819,13 @@ def test_failed_rebind_preserves_old_binding_and_can_start(root) -> None:
         SequenceBindingService(old_bound, RuntimeError("新窗口无效")),
         scheduler,
     )
-    window = MainWindow(root, controller, FakeSettings())
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(AppSettings(auto_activate_game=False)),
+    )
 
-    window.on_bind()
+    window.on_rebind()
     for _ in range(3):
         scheduler.run_next(1000)
     assert window.binding_var.get() == "已绑定：旧窗口"
@@ -707,6 +867,16 @@ def test_controller_bridges_engine_commands_and_cancels_countdown_on_shutdown() 
         ("start", 4), ("pause", "按钮暂停"), "resume", "shutdown"
     ]
     assert completed == []
+
+
+def test_controller_forwards_explicit_game_activation() -> None:
+    engine = BridgeEngine()
+    controller = AppController(engine, BindingService(), ManualScheduler())
+
+    controller.start(2, activate=True)
+    controller.resume(activate=True)
+
+    assert engine.calls == [("start", 2, True), ("resume", True)]
 
 
 def test_controller_ignores_all_commands_after_shutdown() -> None:
@@ -1049,6 +1219,15 @@ class AppSafeInput:
     def release_all(self) -> None:
         self.events.append("input.release_all")
 
+    def close(self) -> None:
+        self.events.append("input.close")
+
+
+class FailingCloseAppSafeInput(AppSafeInput):
+    def close(self) -> None:
+        self.events.append("input.close")
+        raise OSError("关闭屏幕键盘失败")
+
 
 class AppDiagnostics:
     def __init__(self, events: list[object]) -> None:
@@ -1056,6 +1235,27 @@ class AppDiagnostics:
 
     def cleanup(self) -> None:
         self.events.append("diagnostics.cleanup")
+
+
+class AppRuntimeLog:
+    def __init__(self, events: list[object]) -> None:
+        self.events = events
+
+    def start(self) -> Path:
+        self.events.append("runtime_log.start")
+        return Path("runs")
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append(("runtime_log.event", name, fields))
+
+    def close(self) -> None:
+        self.events.append("runtime_log.close")
+
+
+class FailingAppRuntimeLog(AppRuntimeLog):
+    def start(self) -> Path:
+        self.events.append("runtime_log.start")
+        raise OSError("磁盘不可写")
 
 
 class AppMainWindow:
@@ -1108,8 +1308,102 @@ def test_application_wires_f8_and_always_cleans_up_resources() -> None:
         "hotkey.stop",
         "engine.shutdown",
         "input.release_all",
+        "input.close",
         "root.destroy",
     ]
+
+
+def test_application_starts_and_closes_runtime_log() -> None:
+    events: list[object] = []
+    root = AppRoot(events)
+    runtime_log = AppRuntimeLog(events)
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=AppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=runtime_log,
+    )
+
+    Application(
+        services=services,
+        root_factory=lambda: root,
+        main_window_factory=lambda root, controller, settings: AppMainWindow(
+            root, controller, settings, events
+        ),
+    ).run()
+
+    assert "runtime_log.start" in events
+    assert any(
+        event[0:2] == ("runtime_log.event", "application.started")
+        for event in events
+        if isinstance(event, tuple)
+    )
+    assert events.index("runtime_log.start") < events.index("window")
+    assert events.index("runtime_log.close") > events.index("input.release_all")
+    assert events.index("input.release_all") < events.index("input.close")
+    assert events.index("input.close") < events.index("runtime_log.close")
+
+
+def test_application_records_cleanup_failure_before_closing_runtime_log() -> None:
+    events: list[object] = []
+    root = AppRoot(events)
+    runtime_log = AppRuntimeLog(events)
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=FailingCloseAppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=runtime_log,
+    )
+
+    with pytest.raises(BaseExceptionGroup, match="程序关闭清理失败"):
+        Application(
+            services=services,
+            root_factory=lambda: root,
+            main_window_factory=lambda root, controller, settings: AppMainWindow(
+                root, controller, settings, events
+            ),
+        ).run()
+
+    failure = (
+        "runtime_log.event",
+        "application.cleanup_failed",
+        {
+            "step": "关闭屏幕键盘输入",
+            "error_type": "OSError",
+            "detail": "关闭屏幕键盘失败",
+        },
+    )
+    assert failure in events
+    assert events.index(failure) < events.index("runtime_log.close")
+
+
+def test_application_blocks_start_when_runtime_log_initialization_fails() -> None:
+    events: list[object] = []
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=AppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=FailingAppRuntimeLog(events),
+    )
+
+    Application(
+        services=services,
+        root_factory=lambda: AppRoot(events),
+        main_window_factory=lambda root, controller, settings: AppMainWindow(
+            root, controller, settings, events
+        ),
+    ).run()
+
+    assert ("block_start", "运行日志初始化失败：磁盘不可写") in events
 
 
 def test_application_reports_capture_exclusion_failure_without_blocking_start() -> None:
@@ -1222,3 +1516,19 @@ def test_application_builds_settings_store_at_specified_config_path(tmp_path) ->
     services = Application._build_services(tmp_path)
 
     assert services.settings.path == tmp_path / "config.json"
+
+
+def test_application_build_services_shares_runtime_log_with_input_and_engine(tmp_path) -> None:
+    services = Application._build_services(tmp_path)
+
+    assert services.safe_input.recorder is services.runtime_log
+    assert services.safe_input.backend.recorder is services.runtime_log
+    assert services.engine.runtime_log is services.runtime_log
+
+
+def test_application_builds_on_screen_keyboard_input_backend(tmp_path) -> None:
+    services = Application._build_services(tmp_path)
+
+    assert isinstance(services.safe_input.backend, OnScreenKeyboardInputBackend)
+    assert services.safe_input.backend.window.recorder is services.runtime_log
+    assert services.safe_input.backend.mouse.recorder is services.runtime_log

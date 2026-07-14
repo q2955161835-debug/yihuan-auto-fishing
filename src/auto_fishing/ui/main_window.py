@@ -8,6 +8,10 @@ from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.storage.settings import AppSettings
 
 
+_WINDOW_WIDTH = 400
+_WINDOW_HEIGHT = 240
+
+
 class MainWindow:
     """Always-on-top control window for the fishing automation."""
 
@@ -25,14 +29,19 @@ class MainWindow:
 
         root.title("异环自动钓鱼")
         root.geometry(
-            f"320x240{self.settings.window_x:+d}{self.settings.window_y:+d}"
+            f"{_WINDOW_WIDTH}x{_WINDOW_HEIGHT}"
+            f"{self.settings.window_x:+d}{self.settings.window_y:+d}"
         )
-        root.minsize(320, 240)
+        root.minsize(_WINDOW_WIDTH, _WINDOW_HEIGHT)
         root.attributes("-topmost", True)
 
         self.binding_var = tk.StringVar(master=root, value="未绑定")
         self.count_var = tk.StringVar(
             master=root, value=str(self.settings.target_count)
+        )
+        self.auto_activate_var = tk.BooleanVar(
+            master=root,
+            value=self.settings.auto_activate_game,
         )
         self.state_var = tk.StringVar(
             master=root, value=FishingState.UNBOUND.value
@@ -68,7 +77,9 @@ class MainWindow:
             width=7,
         )
         self.count_spinbox.grid(row=1, column=1, sticky="w")
-        ttk.Label(content, text="阶段：").grid(row=1, column=2, sticky="e")
+        ttk.Label(content, text="阶段：").grid(
+            row=1, column=2, padx=(16, 4), sticky="e"
+        )
         ttk.Label(content, textvariable=self.state_var).grid(
             row=1, column=3, sticky="w"
         )
@@ -77,7 +88,9 @@ class MainWindow:
         ttk.Label(content, textvariable=self.progress_var).grid(
             row=2, column=1, sticky="w"
         )
-        ttk.Label(content, text="帧率：").grid(row=2, column=2, sticky="e")
+        ttk.Label(content, text="帧率：").grid(
+            row=2, column=2, padx=(16, 4), sticky="e"
+        )
         ttk.Label(content, textvariable=self.fps_var).grid(
             row=2, column=3, sticky="w"
         )
@@ -86,7 +99,7 @@ class MainWindow:
         ttk.Label(
             content,
             textvariable=self.error_var,
-            wraplength=225,
+            wraplength=305,
         ).grid(row=3, column=1, columnspan=3, sticky="w")
 
         buttons = ttk.Frame(content)
@@ -95,7 +108,7 @@ class MainWindow:
             buttons.columnconfigure(column, weight=1)
 
         self.bind_button = ttk.Button(
-            buttons, text="绑定游戏", command=self.on_bind
+            buttons, text="绑定并开始", command=self.on_bind
         )
         self.bind_button.grid(row=0, column=0, padx=2, sticky="ew")
         self.start_button = ttk.Button(buttons, text="开始", command=self.on_start)
@@ -111,6 +124,18 @@ class MainWindow:
             buttons, text="重新绑定", command=self.on_rebind
         )
         self.rebind_button.grid(row=1, column=0, padx=2, pady=3, sticky="ew")
+        self.auto_activate_check = ttk.Checkbutton(
+            buttons,
+            text="自动切回游戏",
+            variable=self.auto_activate_var,
+        )
+        self.auto_activate_check.grid(
+            row=1,
+            column=1,
+            padx=2,
+            pady=3,
+            sticky="w",
+        )
         ttk.Button(buttons, text="退出", command=self.close).grid(
             row=1, column=2, padx=2, pady=3, sticky="ew"
         )
@@ -120,12 +145,31 @@ class MainWindow:
         )
 
     def on_bind(self) -> None:
-        self._begin_binding(self.controller.bind_after_countdown)
+        target = self._target_count()
+        if target is None:
+            self.error_var.set("数量必须是 1～999 的整数")
+            return
+        self._begin_binding(
+            lambda on_tick, on_done: (
+                self.controller.bind_and_start_after_countdown(
+                    target,
+                    on_tick,
+                    on_done,
+                )
+            ),
+            on_done=self._on_bind_start_done,
+        )
 
     def on_rebind(self) -> None:
         self._begin_binding(self.controller.rebind, allow_paused=True)
 
-    def _begin_binding(self, action: Any, *, allow_paused: bool = False) -> None:
+    def _begin_binding(
+        self,
+        action: Any,
+        *,
+        allow_paused: bool = False,
+        on_done: Any | None = None,
+    ) -> None:
         if self._countdown_active or (
             self._runtime_active
             and not (allow_paused and self._state is FishingState.PAUSED)
@@ -133,10 +177,11 @@ class MainWindow:
             return
         self._countdown_active = True
         self._refresh_control_states()
+        done = on_done or self._on_bind_done
         try:
-            action(self._on_bind_tick, self._on_bind_done)
+            action(self._on_bind_tick, done)
         except Exception as error:
-            self._on_bind_done(None, str(error))
+            done(None, str(error))
 
     def _on_bind_tick(self, seconds: int) -> None:
         self.binding_var.set(f"绑定倒计时：{seconds}")
@@ -155,6 +200,16 @@ class MainWindow:
             self.error_var.set("无")
         self._refresh_control_states()
 
+    def _on_bind_start_done(
+        self,
+        title: str | None,
+        error: str | None,
+    ) -> None:
+        self._on_bind_done(title, error)
+        if title and not error:
+            self._runtime_active = True
+            self._refresh_control_states()
+
     def on_start(self) -> None:
         if (
             self._start_block_reason
@@ -171,11 +226,15 @@ class MainWindow:
         self.error_var.set("无")
         self._refresh_control_states()
         try:
-            self.controller.start_after_countdown(
-                target,
-                self._on_start_tick,
-                self._on_start_done,
-            )
+            if self.auto_activate_var.get():
+                self.controller.start(target, activate=True)
+                self._on_start_done(None)
+            else:
+                self.controller.start_after_countdown(
+                    target,
+                    self._on_start_tick,
+                    self._on_start_done,
+                )
         except Exception as error:
             self._on_start_done(str(error))
 
@@ -198,10 +257,14 @@ class MainWindow:
                 self._countdown_active = True
                 self.error_var.set("无")
                 self._refresh_control_states()
-                self.controller.resume_after_countdown(
-                    self._on_resume_tick,
-                    self._on_resume_done,
-                )
+                if self.auto_activate_var.get():
+                    self.controller.resume(activate=True)
+                    self._on_resume_done(None)
+                else:
+                    self.controller.resume_after_countdown(
+                        self._on_resume_tick,
+                        self._on_resume_done,
+                    )
             else:
                 self.controller.pause()
         except Exception as error:
@@ -307,6 +370,7 @@ class MainWindow:
             target_count=target,
             window_x=self.root.winfo_x(),
             window_y=self.root.winfo_y(),
+            auto_activate_game=bool(self.auto_activate_var.get()),
         )
         try:
             self.settings_store.save(settings)

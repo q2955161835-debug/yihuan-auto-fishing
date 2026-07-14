@@ -34,6 +34,11 @@ try {
         throw '未生成预期发布物'
     }
 
+    & $Python (Join-Path $Root 'scripts\verify_release.py') $Exe
+    if ($LASTEXITCODE -ne 0) {
+        throw '发布物权限清单验证失败'
+    }
+
     Get-FileHash -Algorithm SHA256 -LiteralPath $Exe
 } finally {
     Pop-Location

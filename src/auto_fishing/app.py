@@ -51,6 +51,7 @@ class AppController:
         self._pending_complete: tuple[RuntimeSnapshot, int] | None = None
         self._pending_start_done: StartDone | None = None
         self._pending_resume_done: ResumeDone | None = None
+        self._pending_bind_start_done: BindDone | None = None
 
     def subscribe(self, callback: Callable[[RuntimeSnapshot], None]) -> None:
         self._callbacks.append(callback)
@@ -133,6 +134,34 @@ class AppController:
             cancelled_resume("继续倒计时已取消")
         self._start_binding_countdown(on_tick, on_done)
 
+    def bind_and_start_after_countdown(
+        self,
+        target: int,
+        on_tick: BindTick,
+        on_done: BindDone,
+    ) -> None:
+        cancelled = self._cancel_pending_start_countdown()
+        if cancelled is not None:
+            cancelled("开始倒计时已取消")
+        cancelled_resume = self._cancel_pending_resume_countdown()
+        if cancelled_resume is not None:
+            cancelled_resume("继续倒计时已取消")
+        with self._command_condition:
+            if self._closed:
+                return
+            if self._countdown_active:
+                on_done(self._last_bound_title, "倒计时正在进行")
+                return
+            if self._starting or self.engine.is_running:
+                on_done(self._last_bound_title, "自动化已在运行")
+                return
+            self._pending_bind_start_done = on_done
+        self._start_binding_countdown(
+            on_tick,
+            on_done,
+            start_target=target,
+        )
+
     def rebind(self, on_tick: BindTick, on_done: BindDone) -> None:
         cancelled = self._cancel_pending_start_countdown()
         if cancelled is not None:
@@ -165,6 +194,8 @@ class AppController:
         self,
         on_tick: BindTick,
         on_done: BindDone,
+        *,
+        start_target: int | None = None,
     ) -> None:
         with self._command_condition:
             if self._closed:
@@ -185,25 +216,40 @@ class AppController:
                     self.schedule(1000, lambda: advance(seconds - 1))
                     return
                 self._active_commands += 1
+                if start_target is not None:
+                    self._starting = True
 
             title: str | None = None
             error_message: str | None = None
             try:
                 bound = self.window_service.bind_foreground()
                 self.engine.bind(bound)
+                title = bound.title
+                with self._command_condition:
+                    self._last_bound_title = title
+                    still_current = generation == self._countdown_generation
+                if start_target is not None and still_current:
+                    self.engine.start(start_target)
             except Exception as error:
                 with self._command_condition:
                     title = self._last_bound_title
                 error_message = str(error)
             else:
                 title = bound.title
-                with self._command_condition:
-                    self._last_bound_title = title
             finally:
-                self._finish_command()
                 with self._command_condition:
-                    self._countdown_active = False
-            on_done(title, error_message)
+                    if start_target is not None:
+                        self._starting = False
+                    if generation == self._countdown_generation:
+                        self._countdown_active = False
+                        if self._pending_bind_start_done is on_done:
+                            self._pending_bind_start_done = None
+                        deliver = not self._closed
+                    else:
+                        deliver = False
+                self._finish_command()
+            if deliver:
+                on_done(title, error_message)
 
         try:
             advance(3)
@@ -211,6 +257,8 @@ class AppController:
             with self._command_condition:
                 self._countdown_active = False
                 self._countdown_generation += 1
+                if self._pending_bind_start_done is on_done:
+                    self._pending_bind_start_done = None
             raise
 
     def _cancel_pending_start_countdown(self) -> StartDone | None:
@@ -235,19 +283,31 @@ class AppController:
 
     def _cancel_pending_countdowns_for_pause(
         self,
-    ) -> list[tuple[StartDone | ResumeDone, str]]:
-        cancelled: list[tuple[StartDone | ResumeDone, str]] = []
+    ) -> list[Callable[[], None]]:
+        cancelled: list[Callable[[], None]] = []
         with self._command_condition:
             if self._pending_start_done is not None:
+                callback = self._pending_start_done
                 cancelled.append(
-                    (self._pending_start_done, "开始倒计时已被紧急暂停取消")
+                    lambda done=callback: done("开始倒计时已被紧急暂停取消")
                 )
                 self._pending_start_done = None
             if self._pending_resume_done is not None:
+                callback = self._pending_resume_done
                 cancelled.append(
-                    (self._pending_resume_done, "继续倒计时已被紧急暂停取消")
+                    lambda done=callback: done("继续倒计时已被紧急暂停取消")
                 )
                 self._pending_resume_done = None
+            if self._pending_bind_start_done is not None:
+                callback = self._pending_bind_start_done
+                title = self._last_bound_title
+                cancelled.append(
+                    lambda done=callback, current_title=title: done(
+                        current_title,
+                        "绑定并开始倒计时已被紧急暂停取消",
+                    )
+                )
+                self._pending_bind_start_done = None
             if cancelled:
                 self._countdown_active = False
                 self._countdown_generation += 1
@@ -255,12 +315,10 @@ class AppController:
 
     def _defer_ui_callbacks(
         self,
-        callbacks: list[tuple[StartDone | ResumeDone, str]],
+        callbacks: list[Callable[[], None]],
     ) -> None:
-        for callback, message in callbacks:
-            self._ui_callback_queue.put(
-                lambda done=callback, error=message: done(error)
-            )
+        for callback in callbacks:
+            self._ui_callback_queue.put(callback)
 
     def start_after_countdown(
         self,
@@ -361,14 +419,14 @@ class AppController:
                 self._pending_resume_done = None
             raise
 
-    def start(self, target: int) -> None:
+    def start(self, target: int, *, activate: bool = False) -> None:
         with self._command_condition:
             if self._closed:
                 return
             self._starting = True
             self._active_commands += 1
         try:
-            self.engine.start(target)
+            self.engine.start(target, activate=activate)
         finally:
             with self._command_condition:
                 self._starting = False
@@ -392,11 +450,11 @@ class AppController:
         finally:
             self._finish_command()
 
-    def resume(self) -> None:
+    def resume(self, *, activate: bool = False) -> None:
         if not self._begin_command():
             return
         try:
-            self.engine.resume()
+            self.engine.resume(activate=activate)
         finally:
             self._finish_command()
 
@@ -422,6 +480,7 @@ class AppController:
             self._countdown_generation += 1
             self._pending_start_done = None
             self._pending_resume_done = None
+            self._pending_bind_start_done = None
             self._snapshot_generation += 1
             self._pending_complete = None
             while self._active_commands:
@@ -437,6 +496,7 @@ class ApplicationServices:
     engine: Any
     diagnostics: Any
     settings: Any
+    runtime_log: Any | None = None
 
 
 class Application:
@@ -465,10 +525,21 @@ class Application:
 
         root: Any | None = None
         run_error: BaseException | None = None
+        runtime_log_error: BaseException | None = None
+        runtime_log_started = False
         try:
             services.window_service.enable_dpi_awareness()
             root = self._root_factory()
             services.diagnostics.cleanup()
+            if services.runtime_log is not None:
+                try:
+                    services.runtime_log.start()
+                    services.runtime_log.event(
+                        "application.started", pid=os.getpid()
+                    )
+                    runtime_log_started = True
+                except BaseException as error:
+                    runtime_log_error = error
             control_hwnd = services.window_service.resolve_top_level(
                 root.winfo_id()
             )
@@ -483,14 +554,32 @@ class Application:
                 controller,
                 services.settings,
             )
+            if runtime_log_error is not None:
+                main_window.block_start(
+                    f"运行日志初始化失败：{runtime_log_error}"
+                )
             root.update_idletasks()
-            if not services.window_service.exclude_from_capture(control_hwnd):
+            capture_excluded = services.window_service.exclude_from_capture(
+                control_hwnd
+            )
+            if runtime_log_started:
+                services.runtime_log.event(
+                    "capture.exclusion",
+                    hwnd=control_hwnd,
+                    success=capture_excluded,
+                )
+            if not capture_excluded:
                 main_window.show_warning(
                     "控制窗口无法从截图中排除，请勿遮挡游戏识别区域"
                 )
-            if not services.hotkey.start(
+            hotkey_registered = services.hotkey.start(
                 lambda: controller.pause("F8 紧急暂停")
-            ):
+            )
+            if runtime_log_started:
+                services.runtime_log.event(
+                    "hotkey.registration", success=hotkey_registered
+                )
+            if not hotkey_registered:
                 main_window.block_start("F8 注册失败，请关闭占用 F8 的程序")
             root.mainloop()
         except BaseException as error:
@@ -513,21 +602,36 @@ class Application:
         from auto_fishing.automation.state_machine import FishingStateMachine
         from auto_fishing.capture.dxcam_source import DxcamFrameSource
         from auto_fishing.platform.hotkey import GlobalHotkey
-        from auto_fishing.platform.input import SafeInput, Win32InputBackend
+        from auto_fishing.platform.input import SafeInput, Win32MouseDriver
+        from auto_fishing.platform.on_screen_keyboard import (
+            OnScreenKeyboardInputBackend,
+            OnScreenKeyboardWindow,
+        )
         from auto_fishing.platform.windowing import WindowService
         from auto_fishing.storage.diagnostics import DiagnosticsStore
+        from auto_fishing.storage.runtime_logging import RuntimeLogStore
         from auto_fishing.storage.settings import SettingsStore
         from auto_fishing.vision.progress import ProgressController
         from auto_fishing.vision.scenes import SceneRecognizer
 
         window_service = WindowService()
-        safe_input = SafeInput(Win32InputBackend())
+        runtime_log = RuntimeLogStore(data_dir / "runs")
+        keyboard_window = OnScreenKeyboardWindow(recorder=runtime_log)
+        safe_input = SafeInput(
+            OnScreenKeyboardInputBackend(
+                window=keyboard_window,
+                mouse=Win32MouseDriver(recorder=runtime_log),
+                recorder=runtime_log,
+            ),
+            recorder=runtime_log,
+        )
         scene_recognizer = SceneRecognizer()
         core = AutomationCore(
             state_machine=FishingStateMachine(),
             controller=ProgressController(),
             input_service=safe_input,
             scene_recognizer=scene_recognizer,
+            event_recorder=runtime_log,
         )
         diagnostics = DiagnosticsStore(data_dir / "diagnostics")
         engine = AutomationEngine(
@@ -536,6 +640,7 @@ class Application:
             frame_source=DxcamFrameSource(),
             scene_recognizer=scene_recognizer,
             diagnostics=diagnostics,
+            runtime_log=runtime_log,
         )
         return ApplicationServices(
             window_service=window_service,
@@ -544,6 +649,7 @@ class Application:
             engine=engine,
             diagnostics=diagnostics,
             settings=SettingsStore(data_dir / "config.json"),
+            runtime_log=runtime_log,
         )
 
     @staticmethod
@@ -556,12 +662,14 @@ class Application:
             ("停止 F8 热键", services.hotkey.stop),
             ("关闭自动化引擎", services.engine.shutdown),
             ("释放输入", services.safe_input.release_all),
+            ("关闭屏幕键盘输入", services.safe_input.close),
         ):
             try:
                 action()
             except BaseException as error:
                 error.add_note(label)
                 errors.append(error)
+                Application._record_cleanup_failure(services, label, error)
 
         if root is not None:
             try:
@@ -572,4 +680,38 @@ class Application:
             except BaseException as error:
                 error.add_note("销毁 Tk 主窗口")
                 errors.append(error)
+                Application._record_cleanup_failure(services, "销毁 Tk 主窗口", error)
+
+        if services.runtime_log is not None:
+            try:
+                services.runtime_log.event(
+                    "application.cleanup_finished",
+                    error_count=len(errors),
+                )
+            except BaseException as error:
+                error.add_note("记录关闭诊断")
+                errors.append(error)
+            try:
+                services.runtime_log.close()
+            except BaseException as error:
+                error.add_note("关闭运行日志")
+                errors.append(error)
         return errors
+
+    @staticmethod
+    def _record_cleanup_failure(
+        services: ApplicationServices,
+        label: str,
+        error: BaseException,
+    ) -> None:
+        if services.runtime_log is None:
+            return
+        try:
+            services.runtime_log.event(
+                "application.cleanup_failed",
+                step=label,
+                error_type=type(error).__name__,
+                detail=str(error),
+            )
+        except BaseException:
+            pass

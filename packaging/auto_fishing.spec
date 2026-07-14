@@ -44,4 +44,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     manifest=manifest,
+    uac_admin=True,
 )

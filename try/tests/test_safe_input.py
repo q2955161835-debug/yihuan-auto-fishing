@@ -2,7 +2,7 @@ import ctypes
 
 import pytest
 
-from auto_fishing.model import Direction
+from auto_fishing.model import Direction, Rect
 from auto_fishing.platform.input import (
     INPUT,
     KEYBDINPUT,
@@ -10,6 +10,7 @@ from auto_fishing.platform.input import (
     InputFailure,
     SafeInput,
     Win32InputBackend,
+    Win32MouseDriver,
 )
 
 
@@ -32,6 +33,14 @@ class FakeBackend:
 
     def mouse_up(self) -> None:
         self.events.append(("mouse_up",))
+
+
+class RecordingLog:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append({"event": name, **fields})
 
 
 def test_direction_switch_releases_old_key_first() -> None:
@@ -88,7 +97,54 @@ def test_tap_f_and_click_are_balanced() -> None:
     assert backend.events == [("down", "F"), ("up", "F"), ("click", 200, 300)]
 
 
-def test_tap_f_releases_key_when_sleep_fails() -> None:
+def test_tap_f_waits_for_bounded_pre_press_delay() -> None:
+    backend = FakeBackend()
+    waits: list[float] = []
+    safe = SafeInput(
+        backend,
+        sleep=waits.append,
+        random_uniform=lambda _lower, upper: upper,
+    )
+
+    safe.tap_f()
+
+    assert waits == [0.18, 0.05]
+    assert backend.events == [("down", "F"), ("up", "F")]
+
+
+def test_direction_changes_do_not_wait_for_f_jitter() -> None:
+    backend = FakeBackend()
+    waits: list[float] = []
+    safe = SafeInput(backend, sleep=waits.append)
+
+    safe.set_direction(Direction.LEFT)
+    safe.set_direction(Direction.RIGHT)
+
+    assert waits == []
+    assert backend.events == [("down", "A"), ("up", "A"), ("down", "D")]
+
+
+def test_release_all_cancels_f_before_its_delayed_press() -> None:
+    backend = FakeBackend()
+    waits: list[float] = []
+    safe: SafeInput
+
+    def interrupting_sleep(seconds: float) -> None:
+        waits.append(seconds)
+        safe.release_all()
+
+    safe = SafeInput(
+        backend,
+        sleep=interrupting_sleep,
+        random_uniform=lambda _lower, _upper: 0.10,
+    )
+    safe.tap_f()
+
+    assert waits == [0.10]
+    assert backend.events == []
+
+
+def test_tap_f_does_not_press_when_pre_delay_sleep_fails() -> None:
     backend = FakeBackend()
 
     def fail_sleep(_: float) -> None:
@@ -99,7 +155,7 @@ def test_tap_f_releases_key_when_sleep_fails() -> None:
     with pytest.raises(RuntimeError, match="sleep interrupted"):
         safe.tap_f()
 
-    assert backend.events == [("down", "F"), ("up", "F")]
+    assert backend.events == []
 
 
 class FakeUser32:
@@ -149,6 +205,17 @@ def test_win32_keyboard_uses_scan_codes_and_balanced_flags() -> None:
     assert user32.events == [
         ("send", [("keyboard", 0x1E, 0x0008)], ctypes.sizeof(INPUT)),
         ("send", [("keyboard", 0x1E, 0x000A)], ctypes.sizeof(INPUT)),
+    ]
+
+
+def test_win32_records_sendinput_success_without_stale_error_code() -> None:
+    recorder = RecordingLog()
+    backend = Win32InputBackend(user32=FakeUser32(), recorder=recorder)
+
+    backend.key_down("F")
+
+    assert recorder.events == [
+        {"event": "sendinput.result", "requested": 1, "sent": 1}
     ]
 
 
@@ -226,6 +293,137 @@ def test_win32_raises_when_set_cursor_pos_fails() -> None:
         backend.click(200, 300)
 
     assert user32.events == [("cursor", 200, 300)]
+
+
+def test_win32_records_partial_send_with_windows_error(monkeypatch) -> None:
+    recorder = RecordingLog()
+    user32 = FakeUser32()
+    user32.send_result = 0
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+    backend = Win32InputBackend(user32=user32, recorder=recorder)
+
+    with pytest.raises(InputFailure, match="SendInput sent 0 of 1"):
+        backend.key_down("F")
+
+    assert recorder.events == [
+        {
+            "event": "sendinput.result",
+            "requested": 1,
+            "sent": 0,
+            "windows_error": 5,
+        }
+    ]
+
+
+def test_win32_mouse_driver_moves_and_holds_then_releases_left_button() -> None:
+    user32 = FakeUser32()
+    mouse = Win32MouseDriver(user32=user32)
+
+    mouse.move(200, 300)
+    mouse.down()
+    mouse.up()
+
+    assert user32.events == [
+        ("cursor", 200, 300),
+        ("send", [("mouse", 0x0002)], ctypes.sizeof(INPUT)),
+        ("send", [("mouse", 0x0004)], ctypes.sizeof(INPUT)),
+    ]
+
+
+def test_win32_mouse_driver_reports_cursor_failure_before_mouse_down() -> None:
+    user32 = FakeUser32()
+    user32.cursor_result = 0
+    mouse = Win32MouseDriver(user32=user32)
+
+    with pytest.raises(InputFailure, match="SetCursorPos failed"):
+        mouse.move(200, 300)
+
+    assert user32.events == [("cursor", 200, 300)]
+
+
+def test_win32_records_cursor_result_for_click() -> None:
+    recorder = RecordingLog()
+    backend = Win32InputBackend(user32=FakeUser32(), recorder=recorder)
+
+    backend.click(200, 300)
+
+    assert recorder.events[0] == {
+        "event": "cursor.result",
+        "x": 200,
+        "y": 300,
+        "success": True,
+    }
+
+
+def test_safe_input_records_tap_and_direction_requests() -> None:
+    recorder = RecordingLog()
+    safe = SafeInput(
+        FakeBackend(),
+        sleep=lambda _: None,
+        recorder=recorder,
+        random_uniform=lambda _lower, _upper: 0.10,
+    )
+
+    safe.tap_f()
+    safe.set_direction(Direction.RIGHT)
+    safe.release_all()
+
+    assert recorder.events == [
+        {"event": "input.request", "action": "tap", "key": "F"},
+        {"event": "input.delay", "key": "F", "seconds": 0.10},
+        {"event": "input.request", "action": "key_down", "key": "F"},
+        {"event": "input.request", "action": "key_up", "key": "F"},
+        {"event": "input.request", "action": "key_down", "key": "D"},
+        {"event": "input.request", "action": "key_up", "key": "D"},
+    ]
+
+
+def test_safe_input_records_mouse_click_and_cleanup_request() -> None:
+    class FailingClickBackend(FakeBackend):
+        def click(self, x: int, y: int) -> None:
+            super().click(x, y)
+            raise InputFailure("click failed")
+
+    recorder = RecordingLog()
+    safe = SafeInput(FailingClickBackend(), sleep=lambda _: None, recorder=recorder)
+
+    with pytest.raises(InputFailure, match="click failed"):
+        safe.click(200, 300)
+
+    assert recorder.events == [
+        {"event": "input.request", "action": "click", "x": 200, "y": 300},
+        {"event": "input.request", "action": "mouse_up"},
+    ]
+
+
+def test_safe_input_delegates_keyboard_lifecycle_and_occlusion() -> None:
+    class LifecycleBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared: list[tuple[Rect, Rect]] = []
+            self.closed = 0
+
+        def prepare(self, monitor_rect: Rect, client_rect: Rect) -> None:
+            self.prepared.append((monitor_rect, client_rect))
+
+        def occlusion_rect(self) -> Rect:
+            return Rect(0, 600, 900, 1080)
+
+        def close(self) -> None:
+            self.closed += 1
+
+    backend = LifecycleBackend()
+    safe = SafeInput(backend)
+    monitor = Rect(0, 0, 1920, 1080)
+    client = Rect(0, 0, 1920, 1080)
+
+    safe.prepare(monitor, client)
+    occlusion = safe.occlusion_rect()
+    safe.close()
+
+    assert backend.prepared == [(monitor, client)]
+    assert occlusion == Rect(0, 600, 900, 1080)
+    assert backend.closed == 1
 
 
 @pytest.mark.parametrize(
