@@ -3,6 +3,8 @@ import json
 import math
 from pathlib import Path
 
+from .quota import StorageQuotaManager
+
 
 @dataclass(frozen=True)
 class AppSettings:
@@ -13,8 +15,14 @@ class AppSettings:
 
 
 class SettingsStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        quota: StorageQuotaManager | None = None,
+    ) -> None:
         self.path = path
+        self.quota = quota
 
     def load(self) -> AppSettings:
         if not self.path.exists():
@@ -44,10 +52,13 @@ class SettingsStore:
     def save(self, settings: AppSettings) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(".tmp")
+        previous_size = self.path.stat().st_size if self.path.is_file() else 0
         temp.write_text(
             json.dumps(asdict(settings), ensure_ascii=False, indent=2), "utf-8"
         )
         temp.replace(self.path)
+        if self.quota is not None:
+            self.quota.register_write(self.path, previous_size)
 
 
 def _finite_int(value: object) -> int:

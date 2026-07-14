@@ -34,7 +34,7 @@ class StorageQuotaManager:
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
             self._known_total = self._tree_bytes(self.root)
-            self._enforce()
+            self._enforce(protect_newest=True)
 
     def register_write(
         self,
@@ -56,14 +56,14 @@ class StorageQuotaManager:
             current_size = resolved.stat().st_size if resolved.is_file() else 0
             self._known_total += current_size - max(0, previous_size)
             if self._known_total > self.max_bytes:
-                self._enforce()
+                self._enforce(protect_newest=False)
 
-    def _enforce(self) -> None:
+    def _enforce(self, *, protect_newest: bool) -> None:
         total = self._tree_bytes(self.root)
         if total <= self.max_bytes:
             self._known_total = total
             return
-        active_run = self._effective_active_run()
+        active_run = self._effective_active_run(protect_newest)
         active_events = self._effective_events(active_run)
         for run in self._completed_runs(active_run):
             shutil.rmtree(self._inside(run))
@@ -97,9 +97,11 @@ class StorageQuotaManager:
                 f"数据目录无法清理到容量上限：{total}>{self.max_bytes}"
             )
 
-    def _effective_active_run(self) -> Path | None:
+    def _effective_active_run(self, protect_newest: bool) -> Path | None:
         if self._active_run is not None and self._active_run.is_dir():
             return self._active_run
+        if not protect_newest:
+            return None
         runs_root = self.root / "runs"
         runs = (
             [path for path in runs_root.iterdir() if path.is_dir()]

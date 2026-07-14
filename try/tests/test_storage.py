@@ -108,6 +108,55 @@ def test_quota_rejects_registered_path_outside_data_root(tmp_path):
         quota.register_write(outside, 0)
 
 
+def test_settings_reports_replacement_to_shared_quota(tmp_path):
+    root = tmp_path / "data"
+    quota = StorageQuotaManager(root, max_bytes=100)
+    quota.initialize()
+    store = SettingsStore(root / "config.json", quota=quota)
+
+    store.save(AppSettings(target_count=9))
+
+    assert quota.total_bytes == (root / "config.json").stat().st_size
+
+
+def test_diagnostics_write_enforces_entire_directory_quota(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "runs" / "run-old" / "events.jsonl", 80, 1)
+    quota = StorageQuotaManager(root, max_bytes=90)
+    quota.initialize()
+    store = DiagnosticsStore(root / "diagnostics", quota=quota)
+
+    store.save(np.zeros((20, 20, 3), dtype=np.uint8), "E_TEST", "quota")
+
+    assert not (root / "runs" / "run-old").exists()
+    assert quota.total_bytes <= 90
+
+
+def test_runtime_writer_prunes_oldest_active_frame_when_quota_is_full(tmp_path):
+    root = tmp_path / "data"
+    quota = StorageQuotaManager(root, max_bytes=5000)
+    quota.initialize()
+    store = RuntimeLogStore(root / "runs", queue_size=10, quota=quota)
+    run_dir = store.start()
+    for index in range(8):
+        store.record_frame(
+            np.full((120, 160, 3), index, dtype=np.uint8),
+            observation=SceneObservation(),
+            state_before=FishingState.READY,
+            snapshot=RuntimeSnapshot(FishingState.READY, 0, 1, 30.0),
+            frame_timestamp=float(index),
+            now_monotonic=float(index),
+        )
+    store.close()
+    store.raise_if_failed()
+
+    frames = sorted((run_dir / "frames").glob("*.jpg"))
+    assert frames
+    assert frames[-1].name == "00000008.jpg"
+    assert frames[0].name != "00000001.jpg"
+    assert quota.total_bytes <= 5000
+
+
 def test_settings_round_trip(tmp_path):
     store = SettingsStore(tmp_path / "config.json")
     expected = AppSettings(target_count=8, window_x=12, window_y=34)

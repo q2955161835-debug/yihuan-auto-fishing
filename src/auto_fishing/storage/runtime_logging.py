@@ -15,6 +15,8 @@ import numpy as np
 
 from auto_fishing.model import FishingState, RuntimeSnapshot, SceneObservation
 
+from .quota import StorageQuotaManager
+
 
 class RuntimeLogError(RuntimeError):
     """完整运行记录无法继续保存。"""
@@ -44,10 +46,12 @@ class RuntimeLogStore:
         *,
         queue_size: int = 300,
         now: Callable[[], datetime] | None = None,
+        quota: StorageQuotaManager | None = None,
     ) -> None:
         if queue_size < 1:
             raise ValueError("queue_size 必须至少为 1")
         self.root = root.resolve()
+        self.quota = quota
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._items: queue.Queue[_EventItem | _FrameItem | object] = queue.Queue(
             maxsize=queue_size
@@ -71,6 +75,13 @@ class RuntimeLogStore:
         events_path.touch()
         self._run_dir = run_dir
         self._events_path = events_path
+        if self.quota is not None:
+            self.quota.register_write(
+                events_path,
+                0,
+                active_run=run_dir,
+                active_events=events_path,
+            )
         self._writer = threading.Thread(
             target=self._write_loop,
             name="runtime-log-writer",
@@ -242,16 +253,31 @@ class RuntimeLogStore:
             assert self._run_dir is not None
             image_path = self._run_dir / "frames" / f"{item.index:08d}.jpg"
             image_path.write_bytes(encoded[1].tobytes())
+            if self.quota is not None:
+                self.quota.register_write(
+                    image_path,
+                    0,
+                    active_run=self._run_dir,
+                    active_events=self._events_path,
+                )
             record = item.record
         elif isinstance(item, _EventItem):
             record = item.record
         else:
             raise TypeError("未知运行日志写入项")
         assert self._events_path is not None
+        previous_size = self._events_path.stat().st_size
         with self._events_path.open("a", encoding="utf-8", newline="\n") as output:
             output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             output.write("\n")
             output.flush()
+        if self.quota is not None:
+            self.quota.register_write(
+                self._events_path,
+                previous_size,
+                active_run=self._run_dir,
+                active_events=self._events_path,
+            )
 
 
 def _thumbnail(frame: np.ndarray, max_edge: int) -> np.ndarray:
