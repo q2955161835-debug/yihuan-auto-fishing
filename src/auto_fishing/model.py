@@ -71,6 +71,23 @@ class ProgressObservation:
 
 
 @dataclass(frozen=True)
+class ProgressScanDiagnostics:
+    image_width: int
+    image_height: int
+    scan_rows: tuple[int, ...]
+    minimum_green_width: float
+    yellow_runs: tuple[tuple[int, int], ...]
+    selected_yellow: tuple[int, int] | None
+    green_runs_by_line: tuple[tuple[tuple[int, int], ...], ...]
+    candidate_counts_by_line: tuple[int, ...]
+    reference: tuple[float, float, float] | None
+    selected_green: tuple[int, int] | None
+    agreeing_scanlines: int
+    rejection_reason: str
+    truncated: bool
+
+
+@dataclass(frozen=True)
 class SceneObservation:
     bite: bool = False
     reel_prompt: bool = False
@@ -81,6 +98,7 @@ class SceneObservation:
     progress_scanlines: int = 0
     progress_candidates: int = 0
     progress_rejection: str = ""
+    progress_diagnostics: ProgressScanDiagnostics | None = None
 
 
 @dataclass(frozen=True)

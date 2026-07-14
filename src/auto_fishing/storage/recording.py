@@ -33,6 +33,17 @@ def encode_jpeg(frame: np.ndarray, *, max_edge: int, quality: int) -> bytes:
     return payload.tobytes()
 
 
+def encode_png(image: np.ndarray, *, compression: int = 3) -> bytes:
+    encoded, payload = cv2.imencode(
+        ".png",
+        np.ascontiguousarray(image),
+        [cv2.IMWRITE_PNG_COMPRESSION, compression],
+    )
+    if not encoded:
+        raise OSError("PNG 编码失败")
+    return payload.tobytes()
+
+
 def frame_event_fields(
     *,
     observation: SceneObservation,

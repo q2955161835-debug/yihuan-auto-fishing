@@ -782,12 +782,18 @@ def test_manual_report_releases_inputs_even_when_unbound(tmp_path) -> None:
         diagnostic_reporter=reporter,
         bind=False,
     )
+    input_service.held = {"A"}
 
     engine.report_error()
 
     assert input_service.events.count("release") == 1
     assert reporter.requests[0]["report_type"] == "manual_report"
     assert reporter.requests[0]["frame"] is None
+    context = reporter.requests[0]["context"]
+    assert context["pre_report_state"] == FishingState.UNBOUND.value
+    assert context["pre_report_completed"] == 0
+    assert context["pre_report_target"] == 0
+    assert context["held_keys_before_report"] == ["A"]
 
 
 def test_engine_opens_report_location_through_reporter(tmp_path) -> None:
@@ -1523,6 +1529,13 @@ def test_control_records_weighted_recent_frame_decision() -> None:
     assert event["sample_count"] == 1
     assert event["weighted_error"] == pytest.approx(0.5)
     assert event["confidence"] == 0.8
+    assert event["frame_timestamp"] == 0.1
+    assert event["green_left"] == 0.3
+    assert event["green_right"] == 0.7
+    assert event["yellow_x"] == 0.7
+    assert event["instantaneous_error"] == pytest.approx(0.5)
+    assert event["requested_key"] == "A"
+    assert event["held_keys_before"] == []
     assert input_service.events == ["left"]
 
 

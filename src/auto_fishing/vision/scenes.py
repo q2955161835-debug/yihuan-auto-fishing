@@ -155,6 +155,7 @@ class SceneRecognizer:
             progress_scanlines=progress_result.valid_scanlines,
             progress_candidates=progress_result.candidate_count,
             progress_rejection=progress_result.rejection_reason,
+            progress_diagnostics=progress_result.diagnostics,
         )
 
 

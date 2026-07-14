@@ -37,6 +37,14 @@ _PROGRESS_ENTRY_CONFIRM_FRAMES = 3
 _PROGRESS_ENTRY_MAX_FRAME_GAP = 0.20
 
 
+def _held_keys(input_service: Any) -> list[str]:
+    held = getattr(input_service, "held", ())
+    try:
+        return sorted(str(key) for key in held)
+    except TypeError:
+        return []
+
+
 class InputActionError(RuntimeError):
     """An input boundary failed while applying a core decision."""
 
@@ -284,13 +292,33 @@ class AutomationCore:
         if observation.progress is not None:
             self._reset_progress_tracking()
             self.bar_valid_frames += 1
-            direction = self.controller.decide(observation.progress)
+            progress = observation.progress
+            green_width = progress.green_right - progress.green_left
+            green_center = (progress.green_left + progress.green_right) / 2
+            instantaneous_error = (
+                None
+                if green_width <= 0
+                else (progress.yellow_x - green_center) / green_width
+            )
+            held_keys_before = _held_keys(self.input_service)
+            direction = self.controller.decide(progress)
+            requested_key = {
+                "left": "A",
+                "right": "D",
+            }.get(direction.value)
             self._record(
                 "progress.control",
                 direction=direction.value,
                 sample_count=self.controller.sample_count,
                 weighted_error=self.controller.weighted_error,
-                confidence=observation.progress.confidence,
+                confidence=progress.confidence,
+                frame_timestamp=progress.timestamp,
+                green_left=progress.green_left,
+                green_right=progress.green_right,
+                yellow_x=progress.yellow_x,
+                instantaneous_error=instantaneous_error,
+                requested_key=requested_key,
+                held_keys_before=held_keys_before,
             )
             self._input(lambda: self.input_service.set_direction(direction))
             return
@@ -830,7 +858,9 @@ class AutomationEngine:
         self._pause("E_USER_PAUSE", reason, frame)
 
     def report_error(self) -> Any | None:
-        state = self.core.snapshot.state
+        pre_report_snapshot = self.core.snapshot
+        held_keys_before_report = _held_keys(self.core.input_service)
+        state = pre_report_snapshot.state
         if state in {FishingState.UNBOUND, FishingState.COMPLETE}:
             self.core.block_input()
             try:
@@ -861,7 +891,10 @@ class AutomationEngine:
             detail=f"用户主动报告错误{release_detail}",
             state=self.core.snapshot.state.value,
             frame=frame,
-            context=self._diagnostic_context(),
+            context=self._diagnostic_context(
+                pre_snapshot=pre_report_snapshot,
+                held_keys=held_keys_before_report,
+            ),
         )
 
     def open_report_location(self, path: Any) -> None:
@@ -1310,6 +1343,8 @@ class AutomationEngine:
         replace_existing: bool = False,
         expected_epoch: int | None = None,
     ) -> bool:
+        pre_pause_snapshot = self.core.snapshot
+        held_keys_before_pause = _held_keys(self.core.input_service)
         with self._pause_lock:
             if (
                 expected_epoch is not None
@@ -1368,7 +1403,10 @@ class AutomationEngine:
                     detail=actual_detail,
                     state=self.core.snapshot.state.value,
                     frame=diagnostic_frame,
-                    context=self._diagnostic_context(),
+                    context=self._diagnostic_context(
+                        pre_snapshot=pre_pause_snapshot,
+                        held_keys=held_keys_before_pause,
+                    ),
                 )
             except Exception as error:
                 self.logger.warning("生成诊断包失败: %s", error)
@@ -1528,7 +1566,12 @@ class AutomationEngine:
         except Exception as error:
             self.logger.warning("保存运行日志事件失败: %s", error)
 
-    def _diagnostic_context(self) -> dict[str, Any]:
+    def _diagnostic_context(
+        self,
+        *,
+        pre_snapshot: RuntimeSnapshot | None = None,
+        held_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
         context: dict[str, Any] = {
             "dpi_awareness": getattr(
                 self.window_service,
@@ -1536,6 +1579,16 @@ class AutomationEngine:
                 "unknown",
             )
         }
+        if pre_snapshot is not None:
+            context.update(
+                {
+                    "pre_report_state": pre_snapshot.state.value,
+                    "pre_report_completed": pre_snapshot.completed,
+                    "pre_report_target": pre_snapshot.target,
+                }
+            )
+        if held_keys is not None:
+            context["held_keys_before_report"] = list(held_keys)
         bound = self._bound
         if bound is not None:
             context["monitor_rect"] = self._rect_values(bound.monitor_rect)
