@@ -40,7 +40,7 @@ def test_quota_incrementally_prunes_completed_run_frames_during_active_write(tmp
     quota = StorageQuotaManager(root, max_bytes=220)
     quota.initialize()
     active_events = root / "runs" / "run-new" / "events.jsonl"
-    write_sized(active_events, 5, 30)
+    write_sized(active_events, 15, 30)
     quota.register_write(
         active_events,
         0,

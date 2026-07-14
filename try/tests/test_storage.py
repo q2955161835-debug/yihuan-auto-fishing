@@ -41,6 +41,37 @@ def test_quota_deletes_old_completed_run_before_diagnostics(tmp_path):
     assert tree_bytes(root) <= 35
 
 
+def test_quota_incrementally_prunes_completed_run_frames_during_active_write(
+    tmp_path,
+):
+    root = tmp_path / "data"
+    old_run = root / "runs" / "run-old"
+    old_events = old_run / "events.jsonl"
+    write_sized(old_events, 10, 1)
+    for index in range(20):
+        write_sized(
+            old_run / "frames" / f"{index:08d}.jpg",
+            10,
+            2 + index,
+        )
+    quota = StorageQuotaManager(root, max_bytes=220)
+    quota.initialize()
+    active_events = root / "runs" / "run-new" / "events.jsonl"
+    write_sized(active_events, 15, 30)
+
+    quota.register_write(
+        active_events,
+        0,
+        active_run=active_events.parent,
+        active_events=active_events,
+    )
+
+    assert old_run.is_dir()
+    assert len(list((old_run / "frames").glob("*.jpg"))) == 19
+    assert old_events.is_file()
+    assert quota.total_bytes <= 220
+
+
 def test_quota_deletes_oldest_diagnostic_group_atomically(tmp_path):
     root = tmp_path / "data"
     write_sized(root / "config.json", 5, 1)
