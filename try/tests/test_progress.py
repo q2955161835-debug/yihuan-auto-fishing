@@ -126,19 +126,15 @@ def test_tracks_short_green_bar_when_marker_moves_far_outside() -> None:
         frame(green=(96, 136), yellow=116),
         0.0,
     )
-    pending = recognizer.analyze(
+    moved = recognizer.analyze(
         frame(green=(100, 118), yellow=180),
         1 / 30,
     )
-    observation = recognizer.detect(
-        frame(green=(100, 118), yellow=180),
-        2 / 30,
-    )
 
     assert initial is not None
-    assert pending.observation is None
-    assert pending.rejection_reason == "jump_pending"
+    observation = moved.observation
     assert observation is not None
+    assert moved.rejection_reason == ""
     assert abs(observation.green_left - 100 / 300) < 0.02
     assert abs(observation.green_right - 119 / 300) < 0.02
     assert abs(observation.yellow_x - 180 / 300) < 0.02
@@ -363,12 +359,11 @@ def test_analyze_reports_scanline_consensus() -> None:
     assert result.rejection_reason == ""
 
 
-def test_large_single_frame_jump_is_released_until_confirmed() -> None:
+def test_large_single_frame_jump_is_available_immediately() -> None:
     recognizer = ProgressRecognizer()
 
     assert recognizer.detect(frame((20, 120), 70), 0.0) is not None
-    assert recognizer.detect(frame((170, 270), 220), 1 / 30) is None
-    observation = recognizer.detect(frame((170, 270), 220), 2 / 30)
+    observation = recognizer.detect(frame((170, 270), 220), 1 / 30)
 
     assert observation is not None
     assert observation.green_left > 0.55
@@ -393,17 +388,15 @@ def test_reset_accepts_extreme_marker_as_next_stage_first_frame(
     assert abs(result.observation.yellow_x - yellow / 300) < 0.02
 
 
-def test_yellow_only_jump_is_released_until_confirmed() -> None:
+def test_yellow_only_jump_is_available_immediately() -> None:
     recognizer = ProgressRecognizer()
 
     assert recognizer.detect(frame((70, 170), 120), 0.0) is not None
-    pending = recognizer.analyze(frame((70, 170), 156), 1 / 30)
-    confirmed = recognizer.analyze(frame((70, 170), 156), 2 / 30)
+    moved = recognizer.analyze(frame((70, 170), 156), 1 / 30)
 
-    assert pending.observation is None
-    assert pending.rejection_reason == "jump_pending"
-    assert confirmed.observation is not None
-    assert abs(confirmed.observation.yellow_x - 156 / 300) < 0.02
+    assert moved.observation is not None
+    assert moved.rejection_reason == ""
+    assert abs(moved.observation.yellow_x - 156 / 300) < 0.02
 
 
 def test_missing_frame_does_not_reuse_last_observation() -> None:

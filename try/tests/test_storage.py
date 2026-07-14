@@ -414,7 +414,7 @@ def test_runtime_log_writes_jsonl_and_480px_jpeg(tmp_path):
             ready=True,
             progress_scanlines=2,
             progress_candidates=1,
-            progress_rejection="jump_pending",
+            progress_rejection="no_consensus",
         ),
         state_before=FishingState.READY,
         snapshot=RuntimeSnapshot(FishingState.WAIT_BITE, 0, 1, 30.0),
@@ -432,7 +432,7 @@ def test_runtime_log_writes_jsonl_and_480px_jpeg(tmp_path):
     assert entries[-1]["event"] == "frame.processed"
     assert entries[-1]["progress_scanlines"] == 2
     assert entries[-1]["progress_candidates"] == 1
-    assert entries[-1]["progress_rejection"] == "jump_pending"
+    assert entries[-1]["progress_rejection"] == "no_consensus"
     assert max(image.shape[:2]) == 480
 
 
