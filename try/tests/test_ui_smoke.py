@@ -13,7 +13,9 @@ from auto_fishing.app import (
     ApplicationServices,
 )
 from auto_fishing.platform.on_screen_keyboard import OnScreenKeyboardInputBackend
+from auto_fishing.product import v2_profile
 from auto_fishing.model import FishingState, RuntimeSnapshot
+from auto_fishing.storage.memory_diagnostics import MemoryDiagnosticRecorder
 from auto_fishing.storage.settings import AppSettings
 from auto_fishing.ui.main_window import MainWindow
 
@@ -1549,3 +1551,26 @@ def test_application_builds_on_screen_keyboard_input_backend(tmp_path) -> None:
     assert isinstance(services.safe_input.backend, OnScreenKeyboardInputBackend)
     assert services.safe_input.backend.window.recorder is services.runtime_log
     assert services.safe_input.backend.mouse.recorder is services.runtime_log
+
+
+def test_v2_profile_uses_local_app_data_and_explicit_version(tmp_path) -> None:
+    profile = v2_profile({"LOCALAPPDATA": str(tmp_path)})
+
+    assert profile.version == "2.0.0"
+    assert profile.window_title == "异环自动钓鱼 V2"
+    assert profile.data_dir == tmp_path / "异环自动钓鱼V2"
+    assert profile.use_disk_runtime_log is False
+    assert profile.use_bundle_diagnostics is True
+
+
+def test_v2_services_use_memory_recorder_and_never_create_runs(tmp_path) -> None:
+    profile = v2_profile({"LOCALAPPDATA": str(tmp_path)})
+    services = Application._build_services(profile)
+
+    assert isinstance(services.runtime_log, MemoryDiagnosticRecorder)
+    assert services.diagnostic_reporter is not None
+    assert services.settings.path == profile.data_dir / "config.json"
+    services.runtime_log.start()
+
+    assert not (profile.data_dir / "runs").exists()
+    assert not profile.data_dir.exists()
