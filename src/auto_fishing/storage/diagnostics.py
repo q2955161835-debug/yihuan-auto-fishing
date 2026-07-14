@@ -7,10 +7,18 @@ from collections.abc import Sequence
 import cv2
 import numpy as np
 
+from .quota import StorageQuotaManager
+
 
 class DiagnosticsStore:
-    def __init__(self, diagnostics_dir: Path) -> None:
+    def __init__(
+        self,
+        diagnostics_dir: Path,
+        *,
+        quota: StorageQuotaManager | None = None,
+    ) -> None:
         self.root = diagnostics_dir.resolve()
+        self.quota = quota
 
     def save(
         self,
@@ -35,6 +43,11 @@ class DiagnosticsStore:
         image_path = self.root / f"{stem}.png"
         meta_path = self.root / f"{stem}.json"
         progress_path = self.root / f"{stem}_progress.jpg"
+        candidate_paths = (image_path, meta_path, progress_path)
+        previous_sizes = {
+            path: path.stat().st_size if path.is_file() else 0
+            for path in candidate_paths
+        }
         encoded, payload = cv2.imencode(".png", frame)
         if not encoded:
             raise OSError("诊断截图写入失败")
@@ -60,6 +73,9 @@ class DiagnosticsStore:
             written_paths.append(progress_path)
         for path in written_paths:
             os.utime(path, (now.timestamp(), now.timestamp()))
+        for path in written_paths:
+            if self.quota is not None:
+                self.quota.register_write(path, previous_sizes[path])
         self.cleanup(now)
         return stem
 

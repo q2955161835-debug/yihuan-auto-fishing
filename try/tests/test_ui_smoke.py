@@ -6,7 +6,12 @@ import tkinter as tk
 
 import pytest
 
-from auto_fishing.app import AppController, Application, ApplicationServices
+from auto_fishing.app import (
+    DEFAULT_DATA_DIR,
+    AppController,
+    Application,
+    ApplicationServices,
+)
 from auto_fishing.platform.on_screen_keyboard import OnScreenKeyboardInputBackend
 from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.storage.settings import AppSettings
@@ -1516,6 +1521,18 @@ def test_application_builds_settings_store_at_specified_config_path(tmp_path) ->
     services = Application._build_services(tmp_path)
 
     assert services.settings.path == tmp_path / "config.json"
+
+
+def test_default_data_directory_is_on_d_drive() -> None:
+    assert DEFAULT_DATA_DIR == Path(r"D:\29551\异环自动钓鱼数据")
+
+
+def test_application_build_services_shares_storage_quota(tmp_path) -> None:
+    services = Application._build_services(tmp_path)
+
+    assert services.runtime_log.quota is services.diagnostics.quota
+    assert services.runtime_log.quota is services.settings.quota
+    assert services.runtime_log.quota.root == tmp_path.resolve()
 
 
 def test_application_build_services_shares_runtime_log_with_input_and_engine(tmp_path) -> None:

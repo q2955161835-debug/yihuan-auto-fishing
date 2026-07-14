@@ -86,8 +86,14 @@ try {
 
     if ($Remaining.Count -ne 0) {
         Stop-Process -Id $Remaining.Id -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 250
-        $Remaining = Get-OwnedProcesses
+        $ForceStopDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 100
+            $Remaining = Get-OwnedProcesses
+        } while (
+            $Remaining.Count -ne 0 -and
+            [DateTime]::UtcNow -lt $ForceStopDeadline
+        )
     }
     if ($Remaining.Count -ne 0) {
         throw "发布物仍有残留进程：$($Remaining.Id -join ', ')"

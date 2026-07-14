@@ -9,8 +9,183 @@ import pytest
 
 from auto_fishing.model import FishingState, RuntimeSnapshot, SceneObservation
 from auto_fishing.storage.diagnostics import DiagnosticsStore
+from auto_fishing.storage.quota import StorageQuotaError, StorageQuotaManager
 from auto_fishing.storage.runtime_logging import RuntimeLogError, RuntimeLogStore
 from auto_fishing.storage.settings import AppSettings, SettingsStore
+
+
+def write_sized(path, size, stamp):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    os.utime(path, (stamp, stamp))
+    os.utime(path.parent, (stamp, stamp))
+
+
+def tree_bytes(root):
+    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+
+def test_quota_deletes_old_completed_run_before_diagnostics(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    write_sized(root / "runs" / "run-old" / "events.jsonl", 20, 2)
+    write_sized(root / "runs" / "run-new" / "events.jsonl", 20, 4)
+    write_sized(root / "diagnostics" / "incident.json", 10, 3)
+
+    StorageQuotaManager(root, max_bytes=35).initialize()
+
+    assert not (root / "runs" / "run-old").exists()
+    assert (root / "runs" / "run-new").is_dir()
+    assert (root / "diagnostics" / "incident.json").is_file()
+    assert (root / "config.json").is_file()
+    assert tree_bytes(root) <= 35
+
+
+def test_quota_deletes_oldest_diagnostic_group_atomically(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    write_sized(root / "diagnostics" / "old.png", 10, 2)
+    write_sized(root / "diagnostics" / "old.json", 10, 2)
+    write_sized(root / "diagnostics" / "new.png", 10, 3)
+
+    StorageQuotaManager(root, max_bytes=15).initialize()
+
+    assert not (root / "diagnostics" / "old.png").exists()
+    assert not (root / "diagnostics" / "old.json").exists()
+    assert (root / "diagnostics" / "new.png").is_file()
+    assert (root / "config.json").is_file()
+
+
+def test_quota_keeps_recent_frames_from_newest_run(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    events = root / "runs" / "run-new" / "events.jsonl"
+    write_sized(events, 5, 2)
+    write_sized(events.parent / "frames" / "00000001.jpg", 10, 3)
+    write_sized(events.parent / "frames" / "00000002.jpg", 10, 4)
+
+    StorageQuotaManager(root, max_bytes=20).initialize()
+
+    assert not (events.parent / "frames" / "00000001.jpg").exists()
+    assert (events.parent / "frames" / "00000002.jpg").is_file()
+    assert events.is_file()
+
+
+def test_quota_initialization_scans_data_root_only_once_when_pruning_many_frames(
+    tmp_path,
+):
+    class CountingQuota(StorageQuotaManager):
+        def __init__(self, *args, **kwargs):
+            self.root_scan_count = 0
+            super().__init__(*args, **kwargs)
+
+        def _tree_bytes(self, root):
+            if root.resolve() == self.root:
+                self.root_scan_count += 1
+            return super()._tree_bytes(root)
+
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    events = root / "runs" / "run-new" / "events.jsonl"
+    write_sized(events, 5, 2)
+    for index in range(40):
+        write_sized(
+            events.parent / "frames" / f"{index:08d}.jpg",
+            10,
+            3 + index,
+        )
+    quota = CountingQuota(root, max_bytes=100)
+
+    quota.initialize()
+
+    assert tree_bytes(root) <= 100
+    assert quota.root_scan_count == 1
+
+
+def test_quota_trims_old_event_lines_and_keeps_latest_complete_line(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    events = root / "runs" / "run-new" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_bytes(b'{"n":1}\n{"n":2}\n{"n":3}\n')
+
+    StorageQuotaManager(root, max_bytes=13).initialize()
+
+    assert events.read_bytes() == b'{"n":3}\n'
+    assert tree_bytes(root) <= 13
+
+
+def test_quota_counts_unknown_files_but_never_deletes_them(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "config.json", 5, 1)
+    unknown = root / "keep.bin"
+    write_sized(unknown, 20, 2)
+
+    with pytest.raises(StorageQuotaError, match="无法清理到容量上限"):
+        StorageQuotaManager(root, max_bytes=10).initialize()
+
+    assert unknown.is_file()
+    assert (root / "config.json").is_file()
+
+
+def test_quota_rejects_registered_path_outside_data_root(tmp_path):
+    root = tmp_path / "data"
+    outside = tmp_path / "outside.log"
+    outside.write_bytes(b"x")
+    quota = StorageQuotaManager(root, max_bytes=100)
+    quota.initialize()
+
+    with pytest.raises(StorageQuotaError, match="超出数据根目录"):
+        quota.register_write(outside, 0)
+
+
+def test_settings_reports_replacement_to_shared_quota(tmp_path):
+    root = tmp_path / "data"
+    quota = StorageQuotaManager(root, max_bytes=100)
+    quota.initialize()
+    store = SettingsStore(root / "config.json", quota=quota)
+
+    store.save(AppSettings(target_count=9))
+
+    assert quota.total_bytes == (root / "config.json").stat().st_size
+
+
+def test_diagnostics_write_enforces_entire_directory_quota(tmp_path):
+    root = tmp_path / "data"
+    write_sized(root / "runs" / "run-old" / "events.jsonl", 80, 1)
+    quota = StorageQuotaManager(root, max_bytes=90)
+    quota.initialize()
+    store = DiagnosticsStore(root / "diagnostics", quota=quota)
+
+    store.save(np.zeros((20, 20, 3), dtype=np.uint8), "E_TEST", "quota")
+
+    assert not (root / "runs" / "run-old").exists()
+    assert quota.total_bytes <= 90
+
+
+def test_runtime_writer_prunes_oldest_active_frame_when_quota_is_full(tmp_path):
+    root = tmp_path / "data"
+    quota = StorageQuotaManager(root, max_bytes=5000)
+    quota.initialize()
+    store = RuntimeLogStore(root / "runs", queue_size=10, quota=quota)
+    run_dir = store.start()
+    for index in range(8):
+        store.record_frame(
+            np.full((120, 160, 3), index, dtype=np.uint8),
+            observation=SceneObservation(),
+            state_before=FishingState.READY,
+            snapshot=RuntimeSnapshot(FishingState.READY, 0, 1, 30.0),
+            frame_timestamp=float(index),
+            now_monotonic=float(index),
+        )
+    store.close()
+    store.raise_if_failed()
+
+    frames = sorted((run_dir / "frames").glob("*.jpg"))
+    assert frames
+    assert frames[-1].name == "00000008.jpg"
+    assert frames[0].name != "00000001.jpg"
+    assert quota.total_bytes <= 5000
 
 
 def test_settings_round_trip(tmp_path):
