@@ -432,7 +432,7 @@ def test_runtime_log_cleanup_never_traverses_outside_root(tmp_path):
     assert (root / "not-a-run.txt").is_file()
 
 
-def test_runtime_log_queue_full_surfaces_runtime_log_error(tmp_path):
+def test_runtime_log_queue_full_drops_item_without_failing_automation(tmp_path):
     entered = threading.Event()
     release = threading.Event()
 
@@ -448,7 +448,16 @@ def test_runtime_log_queue_full_surfaces_runtime_log_error(tmp_path):
     assert entered.wait(timeout=1)
     store.event("second")
     store.event("third")
-    with pytest.raises(RuntimeLogError, match="日志队列已满"):
-        store.raise_if_failed()
+    store.raise_if_failed()
     release.set()
     store.close()
+    store.raise_if_failed()
+
+    events_path = next((tmp_path / "runs").glob("run-*/events.jsonl"))
+    records = [json.loads(line) for line in events_path.read_text("utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "first",
+        "logging.backpressure",
+        "second",
+    ]
+    assert records[1]["dropped_items"] == 1
