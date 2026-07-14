@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 V1_DATA_DIR = Path(r"D:\29551\异环自动钓鱼数据")
+V2_VERSION = "2.0.2"
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ def v2_profile(
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA 未配置，无法确定 V2 数据目录")
     return ProductProfile(
-        version="2.0.0",
+        version=V2_VERSION,
         window_title="异环自动钓鱼 V2",
         data_dir=Path(local_app_data) / "异环自动钓鱼V2",
         use_disk_runtime_log=False,
