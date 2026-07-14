@@ -143,3 +143,19 @@ def test_smoke_script_polls_for_onefile_child_window_until_startup_deadline():
     assert "$ResponsiveWindows.Count -eq 0 -and" in script
     assert "[DateTime]::UtcNow -lt $StartupDeadline" in script
     assert "Start-Sleep -Seconds 3" not in script
+
+
+def test_smoke_script_polls_for_process_exit_after_forced_stop():
+    script = (ROOT / "try" / "smoke_exe.ps1").read_text(encoding="utf-8-sig")
+
+    stop_index = script.index("Stop-Process -Id $Remaining.Id")
+    deadline_index = script.index(
+        "$ForceStopDeadline = [DateTime]::UtcNow.AddSeconds(5)"
+    )
+    poll_index = script.index(
+        "[DateTime]::UtcNow -lt $ForceStopDeadline",
+        deadline_index,
+    )
+    residual_index = script.index("发布物仍有残留进程")
+
+    assert stop_index < deadline_index < poll_index < residual_index
