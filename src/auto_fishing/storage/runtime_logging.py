@@ -62,6 +62,8 @@ class RuntimeLogStore:
         self._frame_index = 0
         self._failure: BaseException | None = None
         self._failure_lock = threading.Lock()
+        self._dropped_items = 0
+        self._dropped_lock = threading.Lock()
         self._closed = False
 
     def start(self) -> Path:
@@ -220,7 +222,9 @@ class RuntimeLogStore:
             self._ensure_started()
             self._items.put_nowait(item)
         except queue.Full:
-            self._record_failure(RuntimeLogError("日志队列已满"))
+            with self._dropped_lock:
+                self._dropped_items += 1
+            return
         except BaseException as error:
             self._record_failure(error)
 
@@ -236,10 +240,26 @@ class RuntimeLogStore:
                 if item is self._STOP:
                     return
                 self._write_item(item)
+                dropped_items = self._take_dropped_items()
+                if dropped_items:
+                    self._write_item(
+                        _EventItem(
+                            self._event_record(
+                                "logging.backpressure",
+                                {"dropped_items": dropped_items},
+                            )
+                        )
+                    )
             except BaseException as error:
                 self._record_failure(error)
             finally:
                 self._items.task_done()
+
+    def _take_dropped_items(self) -> int:
+        with self._dropped_lock:
+            dropped_items = self._dropped_items
+            self._dropped_items = 0
+        return dropped_items
 
     def _write_item(self, item: _EventItem | _FrameItem | object) -> None:
         if isinstance(item, _FrameItem):

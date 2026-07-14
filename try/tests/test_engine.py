@@ -788,7 +788,7 @@ def test_engine_pauses_with_e_osk_when_keyboard_geometry_disappears(tmp_path) ->
 def test_engine_pauses_with_e_logging_and_releases_inputs_when_runtime_log_fails(
     tmp_path,
 ):
-    runtime_log = FailingRuntimeLog("日志队列已满")
+    runtime_log = FailingRuntimeLog("磁盘写入失败")
     engine, core, input_service, _window, _source = make_engine(
         tmp_path, runtime_log=runtime_log
     )
@@ -797,7 +797,7 @@ def test_engine_pauses_with_e_logging_and_releases_inputs_when_runtime_log_fails
         engine.start(1)
         wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
         assert core.pause_code == "E_LOGGING"
-        assert "日志队列已满" in core.snapshot.error
+        assert "磁盘写入失败" in core.snapshot.error
         assert input_service.events[-1] == "release"
     finally:
         engine.shutdown()

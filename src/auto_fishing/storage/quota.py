@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-import shutil
 import threading
 
 
@@ -75,9 +74,7 @@ class StorageQuotaManager:
         active_run = self._effective_active_run(protect_newest)
         active_events = self._effective_events(active_run)
         for run in self._completed_runs(active_run):
-            removed_bytes = self._tree_bytes(run)
-            shutil.rmtree(self._inside(run))
-            total -= removed_bytes
+            total = self._prune_completed_run(run, total)
             if total <= self.max_bytes:
                 self._known_total = total
                 return
@@ -110,6 +107,33 @@ class StorageQuotaManager:
             raise StorageQuotaError(
                 f"数据目录无法清理到容量上限：{total}>{self.max_bytes}"
             )
+
+    def _prune_completed_run(self, run: Path, total: int) -> int:
+        resolved_run = self._inside(run)
+        frames = resolved_run / "frames"
+        if frames.is_dir():
+            for path in sorted(frames.glob("*.jpg")):
+                resolved = self._inside(path)
+                removed_bytes = resolved.stat().st_size
+                resolved.unlink()
+                total -= removed_bytes
+                if total <= self.max_bytes:
+                    return total
+        events = resolved_run / "events.jsonl"
+        if total > self.max_bytes and events.is_file():
+            removed_bytes = events.stat().st_size
+            events.unlink()
+            total -= removed_bytes
+        self._remove_empty_run(resolved_run)
+        return total
+
+    @staticmethod
+    def _remove_empty_run(run: Path) -> None:
+        frames = run / "frames"
+        if frames.is_dir() and not any(frames.iterdir()):
+            frames.rmdir()
+        if run.is_dir() and not any(run.iterdir()):
+            run.rmdir()
 
     def _effective_active_run(self, protect_newest: bool) -> Path | None:
         if self._active_run is not None and self._active_run.is_dir():

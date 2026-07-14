@@ -41,6 +41,37 @@ def test_quota_deletes_old_completed_run_before_diagnostics(tmp_path):
     assert tree_bytes(root) <= 35
 
 
+def test_quota_incrementally_prunes_completed_run_frames_during_active_write(
+    tmp_path,
+):
+    root = tmp_path / "data"
+    old_run = root / "runs" / "run-old"
+    old_events = old_run / "events.jsonl"
+    write_sized(old_events, 10, 1)
+    for index in range(20):
+        write_sized(
+            old_run / "frames" / f"{index:08d}.jpg",
+            10,
+            2 + index,
+        )
+    quota = StorageQuotaManager(root, max_bytes=220)
+    quota.initialize()
+    active_events = root / "runs" / "run-new" / "events.jsonl"
+    write_sized(active_events, 15, 30)
+
+    quota.register_write(
+        active_events,
+        0,
+        active_run=active_events.parent,
+        active_events=active_events,
+    )
+
+    assert old_run.is_dir()
+    assert len(list((old_run / "frames").glob("*.jpg"))) == 19
+    assert old_events.is_file()
+    assert quota.total_bytes <= 220
+
+
 def test_quota_deletes_oldest_diagnostic_group_atomically(tmp_path):
     root = tmp_path / "data"
     write_sized(root / "config.json", 5, 1)
@@ -401,7 +432,7 @@ def test_runtime_log_cleanup_never_traverses_outside_root(tmp_path):
     assert (root / "not-a-run.txt").is_file()
 
 
-def test_runtime_log_queue_full_surfaces_runtime_log_error(tmp_path):
+def test_runtime_log_queue_full_drops_item_without_failing_automation(tmp_path):
     entered = threading.Event()
     release = threading.Event()
 
@@ -417,7 +448,16 @@ def test_runtime_log_queue_full_surfaces_runtime_log_error(tmp_path):
     assert entered.wait(timeout=1)
     store.event("second")
     store.event("third")
-    with pytest.raises(RuntimeLogError, match="日志队列已满"):
-        store.raise_if_failed()
+    store.raise_if_failed()
     release.set()
     store.close()
+    store.raise_if_failed()
+
+    events_path = next((tmp_path / "runs").glob("run-*/events.jsonl"))
+    records = [json.loads(line) for line in events_path.read_text("utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "first",
+        "logging.backpressure",
+        "second",
+    ]
+    assert records[1]["dropped_items"] == 1
