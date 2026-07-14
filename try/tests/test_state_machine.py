@@ -194,17 +194,7 @@ def test_each_timed_state_times_out_only_after_its_boundary(
     assert state_machine.paused_from is state
 
 
-@pytest.mark.parametrize(
-    ("resume_event", "expected_state"),
-    [
-        (Event.RESUME_CONTROL, FishingState.CONTROL),
-        (Event.RESUME_READY, FishingState.READY),
-    ],
-)
-def test_pause_records_reason_and_original_state_then_resumes_by_classification(
-    resume_event: Event,
-    expected_state: FishingState,
-) -> None:
+def test_pause_records_reason_and_original_state() -> None:
     state_machine = reach_state(FishingState.CONTROL)
 
     state_machine.pause("F8", 12.0)
@@ -213,32 +203,6 @@ def test_pause_records_reason_and_original_state_then_resumes_by_classification(
     assert state_machine.pause_reason == "F8"
     assert state_machine.paused_from is FishingState.CONTROL
     assert state_machine.entered_at == 12.0
-
-    state_machine.handle(resume_event, 13.0)
-
-    assert state_machine.state is expected_state
-    assert state_machine.entered_at == 13.0
-
-
-def test_wait_result_pause_can_resume_for_result_reconfirmation() -> None:
-    state_machine = reach_state(FishingState.WAIT_RESULT)
-    state_machine.pause("窗口失去前台", 11.0)
-
-    state_machine.handle(Event.RESUME_RESULT, 12.0)
-
-    assert state_machine.state is FishingState.WAIT_RESULT
-    assert state_machine.entered_at == 12.0
-    assert state_machine.pause_reason == ""
-
-
-def test_resume_result_outside_paused_state_is_atomic_failure() -> None:
-    state_machine = reach_state(FishingState.WAIT_RESULT)
-    before = stateful_values(state_machine)
-
-    with pytest.raises(ValueError, match="RESUME_RESULT"):
-        state_machine.handle(Event.RESUME_RESULT, 12.0)
-
-    assert stateful_values(state_machine) == before
 
 
 def test_completed_result_click_cannot_count_again_after_resume_path() -> None:

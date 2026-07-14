@@ -160,30 +160,25 @@ class AutomationCore:
             self.pause_code = final_code
             self._error = final_reason
 
-    def resume(self, observation: SceneObservation, now: float) -> bool:
+    def restart_round(self, now: float) -> bool:
         with self._lock:
             if self.state_machine.state is not FishingState.PAUSED:
                 return False
-            event = None
-            if self.state_machine.paused_from is FishingState.WAIT_RESULT:
-                event = Event.RESUME_RESULT
-            elif observation.progress is not None:
-                event = Event.RESUME_CONTROL
-            elif observation.ready:
-                event = Event.RESUME_READY
-            if event is None:
+            try:
+                self.input_service.release_all()
+            except Exception as error:
+                raise InputActionError(str(error)) from error
+            if not self.state_machine.restart_round(now):
                 return False
-
-            self.state_machine.handle(event, now)
             self._reset_progress_tracking()
+            self._reset_progress_entry()
+            self.controller.decide(None)
+            try:
+                self.scene_recognizer.reset_progress_tracking()
+            except Exception as error:
+                raise VisionActionError(str(error)) from error
             self.bar_valid_frames = 0
             self._reset_result_dismissal()
-            if self.state_machine.state is FishingState.WAIT_RESULT:
-                self._schedule_result_click(
-                    now,
-                    _RESULT_CLICK_DELAY_MIN,
-                    _RESULT_CLICK_DELAY_MAX,
-                )
             self.pause_code = ""
             self._error = ""
             self._input_blocked.clear()
@@ -913,7 +908,7 @@ class AutomationEngine:
                 and snapshot.state is FishingState.PAUSED
             ):
                 self._resume_request = requested_epoch
-        self._runtime_event("automation.resume_requested")
+        self._runtime_event("automation.round_restart_requested")
 
     def cancel_current(self) -> None:
         deadline = time.monotonic() + 2.0
@@ -1103,6 +1098,69 @@ class AutomationEngine:
                 if capture_restarted:
                     continue
 
+                if self.core.snapshot.state is FishingState.PAUSED:
+                    with self._pause_lock:
+                        restart_attempted = (
+                            not self._closing
+                            and resume_token is not None
+                            and resume_token == self._resume_request
+                            and resume_token == self._pause_epoch
+                            and self.core.snapshot.state
+                            is FishingState.PAUSED
+                        )
+                    if not restart_attempted:
+                        self._shutdown_event.wait(0.005)
+                        continue
+                    try:
+                        restarted = self.core.restart_round(now)
+                    except InputActionError as error:
+                        self._pause(
+                            "E_INPUT",
+                            str(error),
+                            packet.frame,
+                            expected_epoch=frame_epoch,
+                        )
+                        self._shutdown_event.wait(0.005)
+                        continue
+                    except VisionActionError as error:
+                        self._pause(
+                            "E_VISION",
+                            str(error),
+                            packet.frame,
+                            expected_epoch=frame_epoch,
+                        )
+                        self._shutdown_event.wait(0.005)
+                        continue
+                    except Exception as error:
+                        self._pause(
+                            "E_AUTOMATION",
+                            str(error),
+                            packet.frame,
+                            expected_epoch=frame_epoch,
+                        )
+                        self._shutdown_event.wait(0.005)
+                        continue
+                    with self._pause_lock:
+                        restart_invalidated = (
+                            self._closing
+                            or resume_token != self._pause_epoch
+                        )
+                        if restarted and not restart_invalidated:
+                            if self._resume_request == resume_token:
+                                self._resume_request = None
+                            self._diagnostic_recorded = False
+                    if restarted and restart_invalidated:
+                        self.core.pause(
+                            "重开当前轮请求已失效",
+                            now,
+                            code="E_USER_PAUSE",
+                        )
+                    if restarted:
+                        self._runtime_event("automation.round_restarted")
+                    self._publish()
+                    self._shutdown_event.wait(0.001)
+                    continue
+
                 try:
                     client_frame = self._crop_client(packet.frame, bound)
                 except Exception as error:
@@ -1142,41 +1200,6 @@ class AutomationEngine:
                         expected_epoch=frame_epoch,
                     )
                     self._shutdown_event.wait(0.005)
-                    continue
-
-                if self.core.snapshot.state is FishingState.PAUSED:
-                    with self._pause_lock:
-                        resume_attempted = (
-                            not self._closing
-                            and resume_token is not None
-                            and resume_token == self._resume_request
-                            and resume_token == self._pause_epoch
-                            and self.core.snapshot.state
-                            is FishingState.PAUSED
-                        )
-                    if not resume_attempted:
-                        self._shutdown_event.wait(0.005)
-                        continue
-                    resumed = self.core.resume(observation, now)
-                    with self._pause_lock:
-                        resume_invalidated = (
-                            self._closing
-                            or resume_token != self._pause_epoch
-                        )
-                        if resumed and not resume_invalidated:
-                            if self._resume_request == resume_token:
-                                self._resume_request = None
-                            self._diagnostic_recorded = False
-                    if resumed and resume_invalidated:
-                        self.core.pause(
-                            "恢复请求已失效",
-                            now,
-                            code="E_USER_PAUSE",
-                        )
-                    if resumed:
-                        self._runtime_event("automation.resumed")
-                    self._publish()
-                    self._shutdown_event.wait(0.001)
                     continue
 
                 client_packet = FramePacket(
@@ -1248,6 +1271,7 @@ class AutomationEngine:
                         self.core.pause_code or "E_TIMEOUT",
                         snapshot.error,
                         packet.frame,
+                        expected_epoch=frame_epoch,
                     )
                 else:
                     self._publish()

@@ -516,39 +516,6 @@ class CapturedBarrierRecognizer(ScriptedRecognizer):
         return result
 
 
-class AbaRecognizer(ScriptedRecognizer):
-    def __init__(self) -> None:
-        super().__init__([SceneObservation()])
-        self.block_a = False
-        self.a_entered = threading.Event()
-        self.allow_a = threading.Event()
-        self.a_returned = threading.Event()
-        self.b_entered = threading.Event()
-        self.allow_b = threading.Event()
-        self.b_returned = threading.Event()
-
-    def observe(
-        self,
-        frame: np.ndarray,
-        timestamp: float,
-        *,
-        occlusion: Rect | None = None,
-    ) -> SceneObservation:
-        if self.block_a:
-            self.block_a = False
-            result = SceneObservation(ready=True)
-            self.a_entered.set()
-            assert self.allow_a.wait(timeout=1)
-            self.a_returned.set()
-            return result
-        if self.a_returned.is_set() and not self.b_returned.is_set():
-            self.b_entered.set()
-            assert self.allow_b.wait(timeout=1)
-            self.b_returned.set()
-            return SceneObservation(ready=True)
-        return super().observe(frame, timestamp, occlusion=occlusion)
-
-
 class SnapshotBarrierCore:
     def __init__(self, core: AutomationCore) -> None:
         object.__setattr__(self, "core", core)
@@ -625,6 +592,35 @@ class LateReleaseCoreProxy:
             self.core.release_inputs()
         except InputActionError as error:
             raise self.late_error from error
+
+
+class AbaRestartCoreProxy:
+    def __init__(self, core: AutomationCore) -> None:
+        self.core = core
+        self.calls = 0
+        self.a_entered = threading.Event()
+        self.allow_a = threading.Event()
+        self.a_returned = threading.Event()
+        self.b_entered = threading.Event()
+        self.allow_b = threading.Event()
+        self.b_returned = threading.Event()
+
+    def __getattr__(self, name: str):
+        return getattr(self.core, name)
+
+    def restart_round(self, now: float) -> bool:
+        self.calls += 1
+        if self.calls == 1:
+            self.a_entered.set()
+            assert self.allow_a.wait(timeout=1)
+            result = self.core.restart_round(now)
+            self.a_returned.set()
+            return result
+        self.b_entered.set()
+        assert self.allow_b.wait(timeout=1)
+        result = self.core.restart_round(now)
+        self.b_returned.set()
+        return result
 
 
 def single_round_observations(
@@ -1190,7 +1186,7 @@ def test_progress_entry_keeps_narrow_bar_and_free_yellow_position(
     assert not ({"left", "right"} & set(input_service.events))
 
 
-def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> None:
+def test_wait_result_continue_discards_pending_result_delay() -> None:
     samples: list[tuple[float, float]] = []
 
     def sample(low: float, high: float) -> float:
@@ -1201,15 +1197,86 @@ def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> No
     enter_wait_result(core, state_machine, now=1.0)
     core.pause("用户暂停", 1.5)
 
-    assert core.resume(SceneObservation(), 2.0) is True
-    assert core.snapshot.state is FishingState.WAIT_RESULT
-
-    core.process(SceneObservation(), None, 5.099, CLIENT)
+    assert core.restart_round(2.0) is True
+    assert core.snapshot.state is FishingState.READY
+    assert core.result_next_click_at is None
     assert not any(isinstance(event, tuple) for event in input_service.events)
-    core.process(SceneObservation(), None, 5.10, CLIENT)
+    assert samples == [(3.10, 3.60)]
 
-    assert core.snapshot.state is FishingState.COMPLETE
-    assert samples == [(3.10, 3.60), (3.10, 3.60)]
+
+@pytest.mark.parametrize(
+    "paused_from",
+    [
+        FishingState.WAIT_BITE,
+        FishingState.WAIT_BAR,
+        FishingState.CONTROL,
+        FishingState.WAIT_RESULT,
+    ],
+)
+def test_core_restart_round_preserves_progress_and_releases_input(
+    paused_from: FishingState,
+) -> None:
+    core, input_service, state_machine = make_core()
+    core.start(3, 0.0)
+    events_by_state = {
+        FishingState.WAIT_BITE: [Event.CAST_SENT],
+        FishingState.WAIT_BAR: [Event.CAST_SENT, Event.REEL_SENT],
+        FishingState.CONTROL: [
+            Event.CAST_SENT,
+            Event.REEL_SENT,
+            Event.BAR_DETECTED,
+        ],
+        FishingState.WAIT_RESULT: [
+            Event.CAST_SENT,
+            Event.REEL_SENT,
+            Event.BAR_DETECTED,
+            Event.BAR_GONE,
+        ],
+    }
+    for event in events_by_state[paused_from]:
+        state_machine.handle(event, 1.0)
+    state_machine.completed = 1
+    core.pause("用户暂停", 2.0)
+
+    assert core.restart_round(3.0) is True
+    assert core.snapshot.state is FishingState.READY
+    assert core.snapshot.completed == 1
+    assert core.snapshot.target == 3
+    assert core.snapshot.error == ""
+    assert input_service.events[-1] == "release"
+    assert core.input_blocked is False
+
+
+def test_engine_continue_ignores_false_progress_and_casts_new_round(
+    tmp_path,
+) -> None:
+    recognizer = ScriptedRecognizer()
+    engine, core, input_service, _window, _source = make_engine(
+        tmp_path,
+        recognizer=recognizer,
+    )
+    engine.start(3)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    engine.pause("用户暂停")
+    core.state_machine.completed = 1
+    false_progress = ProgressObservation(0.10, 0.28, 0.54, 0.8, 1.0)
+    recognizer.observations.extend(
+        [
+            SceneObservation(progress=false_progress),
+            SceneObservation(progress=false_progress),
+        ]
+    )
+
+    engine.resume()
+    try:
+        wait_until(lambda: input_service.events.count("F") == 2)
+
+        assert core.snapshot.state is FishingState.WAIT_BITE
+        assert core.snapshot.completed == 1
+        assert core.snapshot.target == 3
+        assert not ({"left", "right"} & set(input_service.events))
+    finally:
+        engine.shutdown()
 
 
 def test_result_click_uses_fallback_point_outside_screen_keyboard() -> None:
@@ -1725,7 +1792,7 @@ def test_pause_serializes_with_inflight_process_and_finishes_with_release() -> N
     assert input_service.events == ["F", "release"]
 
 
-def test_core_timeout_resume_rejects_result_scene_and_accepts_ready() -> None:
+def test_core_timeout_restart_does_not_classify_scene() -> None:
     core, _input_service, state_machine = make_core()
     core.start(1, 0.0)
     core.process(SceneObservation(), None, 3.1, CLIENT)
@@ -1733,9 +1800,7 @@ def test_core_timeout_resume_rejects_result_scene_and_accepts_ready() -> None:
     assert core.snapshot.state is FishingState.PAUSED
     assert core.pause_code == "E_TIMEOUT"
 
-    assert core.resume(SceneObservation(result=True), 4.0) is False
-    assert state_machine.state is FishingState.PAUSED
-    assert core.resume(SceneObservation(ready=True), 4.1) is True
+    assert core.restart_round(4.0) is True
     assert state_machine.state is FishingState.READY
 
 
@@ -2035,7 +2100,7 @@ def test_output_restart_failure_is_capture_error(tmp_path) -> None:
     assert core.pause_code == "E_CAPTURE"
 
 
-def test_engine_resume_does_not_use_result_recognition(tmp_path) -> None:
+def test_engine_continue_ignores_result_recognition_and_casts(tmp_path) -> None:
     recognizer = ScriptedRecognizer([SceneObservation()])
     engine, core, input_service, _window, _source = make_engine(
         tmp_path, recognizer=recognizer
@@ -2047,11 +2112,13 @@ def test_engine_resume_does_not_use_result_recognition(tmp_path) -> None:
         [SceneObservation(result=True), SceneObservation(result=True)]
     )
     engine.resume()
-    time.sleep(0.1)
+    try:
+        wait_until(lambda: input_service.events.count("F") == 2)
 
-    assert core.snapshot.state is FishingState.PAUSED
-    assert not any(isinstance(event, tuple) for event in input_service.events)
-    engine.shutdown()
+        assert core.snapshot.state is FishingState.WAIT_BITE
+        assert not any(isinstance(event, tuple) for event in input_service.events)
+    finally:
+        engine.shutdown()
 
 
 def test_engine_start_checks_foreground_without_forcing_activation(
@@ -2179,7 +2246,7 @@ def test_engine_start_rejects_background_game_without_worker(tmp_path) -> None:
     assert core.snapshot.state is FishingState.UNBOUND
 
 
-def test_resume_after_manual_foreground_keeps_request_until_third_stable_frame(
+def test_resume_after_manual_foreground_restarts_before_visual_classification(
     tmp_path,
 ) -> None:
     events: list[str] = []
@@ -2208,12 +2275,10 @@ def test_resume_after_manual_foreground_keeps_request_until_third_stable_frame(
     try:
         assert events[:2] == ["ui-continue", "foreground"]
         assert "activate" not in events
-        assert [event for event in events if event.startswith("frame-")][:3] == [
-            "frame-1",
-            "frame-2",
-            "frame-3",
-        ]
-        assert recognizer.resume_frames >= 3
+        assert [event for event in events if event.startswith("frame-")][0] == (
+            "frame-1"
+        )
+        assert recognizer.resume_frames >= 1
         assert engine._resume_request is None
         assert input_service.events.count("F") == 2
     finally:
@@ -2245,7 +2310,7 @@ def test_late_window_error_cannot_invalidate_new_resume_request(tmp_path) -> Non
         wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
         assert engine._pause_epoch == resume_epoch
         assert engine._resume_request is None
-        assert recognizer.resume_frames >= 3
+        assert recognizer.resume_frames >= 1
         assert input_service.events.count("F") == 2
     finally:
         error.allow_stringify.set()
@@ -2276,7 +2341,7 @@ def test_late_latest_error_cannot_clear_resume_token_or_exit_worker(tmp_path) ->
         assert engine._pause_epoch == resume_epoch
         assert engine._resume_request is None
         assert engine.is_running is True
-        assert recognizer.resume_frames >= 3
+        assert recognizer.resume_frames >= 1
         assert input_service.events.count("F") == 2
     finally:
         source.allow_second_latest.set()
@@ -2314,7 +2379,7 @@ def test_late_stale_frame_release_error_cannot_clear_resume_token(tmp_path) -> N
         assert engine._pause_epoch == resume_epoch
         assert engine._resume_request is None
         assert engine.is_running is True
-        assert recognizer.resume_frames >= 3
+        assert recognizer.resume_frames >= 1
         assert input_service.events.count("F") == 2
     finally:
         late_error.allow_stringify.set()
@@ -2329,7 +2394,7 @@ def test_resume_requires_manual_foreground_without_activation(tmp_path) -> None:
         window_service=window_service,
     )
     engine.start(1)
-    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE, timeout=2.0)
     activate_calls_before_resume = window_service.activate_calls
     engine.pause("用户暂停")
     window_service.foreground = False
@@ -2393,7 +2458,7 @@ def test_resume_does_not_consume_observation_captured_before_request(tmp_path) -
     engine.pause("pause during recognition")
     engine.resume()
     recognizer.allow.set()
-    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
+    wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE, timeout=2.0)
 
     assert core.snapshot.state is FishingState.WAIT_BITE
     engine.shutdown()
@@ -2441,33 +2506,37 @@ def test_pause_cancels_inflight_resume_request_before_returning(tmp_path) -> Non
 
     assert core.snapshot.state is FishingState.PAUSED
     assert input_service.events[-1] == "release"
-    assert len(input_service.events) == event_count
+    assert "F" not in input_service.events[event_count:]
+    assert not (
+        {"left", "right"} & set(input_service.events[event_count:])
+    )
     engine.shutdown()
 
 
 def test_resume_aba_does_not_let_request_a_consume_request_b(tmp_path) -> None:
-    recognizer = AbaRecognizer()
+    recognizer = ScriptedRecognizer()
     engine, core, input_service, _window, _source = make_engine(
         tmp_path, recognizer=recognizer
     )
     engine.start(1)
     wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
     engine.pause("pause for request A")
-    recognizer.block_a = True
+    proxy = AbaRestartCoreProxy(core)
+    engine.core = proxy
     engine.resume()
-    assert recognizer.a_entered.wait(timeout=1)
+    assert proxy.a_entered.wait(timeout=1)
 
     engine.pause("invalidate request A")
     engine.resume()
-    recognizer.allow_a.set()
-    assert recognizer.a_returned.wait(timeout=1)
-    assert recognizer.b_entered.wait(timeout=1)
+    proxy.allow_a.set()
+    assert proxy.a_returned.wait(timeout=1)
+    assert proxy.b_entered.wait(timeout=1)
 
     assert core.snapshot.state is FishingState.PAUSED
     assert input_service.events.count("F") == 1
 
-    recognizer.allow_b.set()
-    assert recognizer.b_returned.wait(timeout=1)
+    proxy.allow_b.set()
+    assert proxy.b_returned.wait(timeout=1)
     wait_until(lambda: core.snapshot.state is FishingState.WAIT_BITE)
     engine.shutdown()
 

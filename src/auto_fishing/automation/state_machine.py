@@ -12,9 +12,6 @@ class Event(Enum):
     BAR_GONE = auto()
     RESULT_CLICKED = auto()
     INTERVAL_ELAPSED = auto()
-    RESUME_CONTROL = auto()
-    RESUME_RESULT = auto()
-    RESUME_READY = auto()
 
 
 TRANSITIONS = {
@@ -23,9 +20,6 @@ TRANSITIONS = {
     (FishingState.WAIT_BAR, Event.BAR_DETECTED): FishingState.CONTROL,
     (FishingState.CONTROL, Event.BAR_GONE): FishingState.WAIT_RESULT,
     (FishingState.INTER_ROUND, Event.INTERVAL_ELAPSED): FishingState.READY,
-    (FishingState.PAUSED, Event.RESUME_CONTROL): FishingState.CONTROL,
-    (FishingState.PAUSED, Event.RESUME_RESULT): FishingState.WAIT_RESULT,
-    (FishingState.PAUSED, Event.RESUME_READY): FishingState.READY,
 }
 
 TIMEOUTS = {
@@ -91,9 +85,6 @@ class FishingStateMachine:
         next_state = TRANSITIONS.get((self.state, event))
         if next_state is None:
             raise ValueError(f"illegal event {event.name} in state {self.state.name}")
-
-        if event is Event.RESUME_RESULT:
-            self.pause_reason = ""
 
         self.state = next_state
         self.entered_at = now
