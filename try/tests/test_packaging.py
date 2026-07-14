@@ -235,3 +235,10 @@ def test_smoke_script_requires_elevated_session_before_launch() -> None:
     launch = script.index("Start-Process -FilePath $ExePath")
 
     assert admin_check < failure < launch
+
+
+def test_root_release_binaries_are_git_ignored() -> None:
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert "/异环自动钓鱼.exe" in ignore
+    assert "/异环自动钓鱼V2.exe" in ignore

@@ -11,6 +11,7 @@ htmlcov/
 build/
 dist/
 /异环自动钓鱼.exe
+/异环自动钓鱼V2.exe
 logs/
 diagnostics/
 try/generated/
