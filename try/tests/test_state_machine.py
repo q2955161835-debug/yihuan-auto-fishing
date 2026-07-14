@@ -281,3 +281,36 @@ def test_snapshot_contains_runtime_values_without_mutating_machine() -> None:
         error="识别失败",
     )
     assert stateful_values(state_machine) == before
+
+
+@pytest.mark.parametrize(
+    "paused_from",
+    [
+        FishingState.WAIT_BITE,
+        FishingState.WAIT_BAR,
+        FishingState.CONTROL,
+        FishingState.WAIT_RESULT,
+    ],
+)
+def test_restart_round_preserves_counts_and_returns_ready(
+    paused_from: FishingState,
+) -> None:
+    state_machine = reach_state(paused_from)
+    state_machine.completed = 1
+    state_machine.pause("用户暂停", 12.0)
+
+    assert state_machine.restart_round(20.0) is True
+    assert state_machine.state is FishingState.READY
+    assert state_machine.target == 2
+    assert state_machine.completed == 1
+    assert state_machine.entered_at == 20.0
+    assert state_machine.pause_reason == ""
+    assert state_machine.paused_from is None
+
+
+def test_restart_round_outside_pause_is_atomic_noop() -> None:
+    state_machine = reach_state(FishingState.CONTROL)
+    before = stateful_values(state_machine)
+
+    assert state_machine.restart_round(20.0) is False
+    assert stateful_values(state_machine) == before

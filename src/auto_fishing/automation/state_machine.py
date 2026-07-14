@@ -105,6 +105,15 @@ class FishingStateMachine:
         self.pause_reason = reason
         self.entered_at = now
 
+    def restart_round(self, now: float) -> bool:
+        if self.state is not FishingState.PAUSED:
+            return False
+        self.state = FishingState.READY
+        self.entered_at = now
+        self.pause_reason = ""
+        self.paused_from = None
+        return True
+
     def check_timeout(self, now: float) -> bool:
         timeout = TIMEOUTS.get(self.state)
         if timeout is None or now - self.entered_at <= timeout:
