@@ -16,6 +16,7 @@ from auto_fishing.platform.on_screen_keyboard import OnScreenKeyboardInputBacken
 from auto_fishing.product import v2_profile
 from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.storage.memory_diagnostics import MemoryDiagnosticRecorder
+from auto_fishing.storage.diagnostic_bundles import DiagnosticReportResult
 from auto_fishing.storage.settings import AppSettings
 from auto_fishing.ui.main_window import MainWindow
 
@@ -67,6 +68,12 @@ class FakeController:
 
     def shutdown(self) -> None:
         self.calls.append("shutdown")
+
+    def report_error(self) -> None:
+        self.calls.append("report_error")
+
+    def open_report_location(self, path: Path) -> None:
+        self.calls.append(("open_report_location", path))
 
     def subscribe(self, callback) -> None:
         self.callback = callback
@@ -1265,6 +1272,28 @@ class FailingAppRuntimeLog(AppRuntimeLog):
         raise OSError("磁盘不可写")
 
 
+class AppReporter:
+    def __init__(self, events: list[object]) -> None:
+        self.events = events
+        self.requests: list[dict[str, object]] = []
+
+    def subscribe(self, callback) -> None:
+        self.callback = callback
+        self.events.append("reporter.subscribe")
+
+    def request_report(self, **fields: object):
+        self.requests.append(dict(fields))
+        self.events.append(("reporter.request", fields["code"]))
+        from concurrent.futures import Future
+
+        future = Future()
+        future.set_result(None)
+        return future
+
+    def close(self, timeout: float = 2.0) -> None:
+        self.events.append(("reporter.close", timeout))
+
+
 class AppMainWindow:
     def __init__(self, root, controller, settings, events) -> None:
         self.events = events
@@ -1352,6 +1381,39 @@ def test_application_starts_and_closes_runtime_log() -> None:
     assert events.index("runtime_log.close") > events.index("input.release_all")
     assert events.index("input.release_all") < events.index("input.close")
     assert events.index("input.close") < events.index("runtime_log.close")
+
+
+def test_application_reports_mainloop_error_and_closes_reporter_before_recorder() -> None:
+    events: list[object] = []
+    root = AppRoot(events)
+    root.on_mainloop = lambda: (_ for _ in ()).throw(RuntimeError("界面失败"))
+    runtime_log = AppRuntimeLog(events)
+    reporter = AppReporter(events)
+    services = ApplicationServices(
+        window_service=AppWindowService(events),
+        hotkey=AppHotkey(events, succeeds=True),
+        safe_input=AppSafeInput(events),
+        engine=BridgeEngine(events),
+        diagnostics=AppDiagnostics(events),
+        settings=FakeSettings(),
+        runtime_log=runtime_log,
+        diagnostic_reporter=reporter,
+    )
+
+    with pytest.raises(RuntimeError, match="界面失败"):
+        Application(
+            services=services,
+            root_factory=lambda: root,
+            main_window_factory=lambda root, controller, settings: AppMainWindow(
+                root, controller, settings, events
+            ),
+        ).run()
+
+    assert reporter.requests[0]["report_type"] == "automatic"
+    assert reporter.requests[0]["code"] == "E_APPLICATION"
+    assert events.index(("reporter.close", 2.0)) < events.index(
+        "runtime_log.close"
+    )
 
 
 def test_application_records_cleanup_failure_before_closing_runtime_log() -> None:
@@ -1574,3 +1636,54 @@ def test_v2_services_use_memory_recorder_and_never_create_runs(tmp_path) -> None
 
     assert not (profile.data_dir / "runs").exists()
     assert not profile.data_dir.exists()
+
+
+def test_v2_window_shows_version_and_report_controls(root) -> None:
+    controller = FakeController()
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(),
+        window_title="异环自动钓鱼 V2",
+        diagnostics_enabled=True,
+    )
+
+    assert root.title() == "异环自动钓鱼 V2"
+    window.report_button.invoke()
+    assert controller.calls[-1] == "report_error"
+    assert window.open_report_button.instate(["disabled"])
+
+
+def test_report_result_enables_open_location(root, tmp_path) -> None:
+    controller = FakeController()
+    window = MainWindow(
+        root,
+        controller,
+        FakeSettings(),
+        window_title="异环自动钓鱼 V2",
+        diagnostics_enabled=True,
+    )
+    path = tmp_path / "诊断.zip"
+    path.write_bytes(b"zip")
+
+    window.show_diagnostic_result(DiagnosticReportResult(path, None))
+    window.open_report_button.invoke()
+
+    assert str(path) in window.diagnostic_path_var.get()
+    assert window.open_report_button.instate(["!disabled"])
+    assert controller.calls[-1] == ("open_report_location", path)
+
+
+def test_report_failure_is_visible_and_keeps_open_disabled(root) -> None:
+    window = MainWindow(
+        root,
+        FakeController(),
+        FakeSettings(),
+        window_title="异环自动钓鱼 V2",
+        diagnostics_enabled=True,
+    )
+
+    window.show_diagnostic_result(DiagnosticReportResult(None, "写入失败"))
+
+    assert window.error_var.get() == "诊断包生成失败：写入失败"
+    assert window.open_report_button.instate(["disabled"])

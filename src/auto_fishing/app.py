@@ -454,6 +454,24 @@ class AppController:
         finally:
             self._finish_command()
 
+    def report_error(self) -> None:
+        cancelled = self._cancel_pending_countdowns_for_pause()
+        self._defer_ui_callbacks(cancelled)
+        if not self._begin_command():
+            return
+        try:
+            self.engine.report_error()
+        finally:
+            self._finish_command()
+
+    def open_report_location(self, path: Path) -> None:
+        if not self._begin_command():
+            return
+        try:
+            self.engine.open_report_location(path)
+        finally:
+            self._finish_command()
+
     def resume(self, *, activate: bool = False) -> None:
         if not self._begin_command():
             return
@@ -560,7 +578,30 @@ class Application:
                 root,
                 controller,
                 services.settings,
+                **(
+                    {
+                        "window_title": (
+                            self._profile.window_title
+                            if self._profile is not None
+                            else "异环自动钓鱼"
+                        ),
+                        "diagnostics_enabled": (
+                            services.diagnostic_reporter is not None
+                        ),
+                    }
+                    if self._main_window_factory is MainWindow
+                    else {}
+                ),
             )
+            if services.diagnostic_reporter is not None:
+                services.diagnostic_reporter.subscribe(
+                    lambda result: root.after(
+                        0,
+                        lambda current=result: (
+                            main_window.show_diagnostic_result(current)
+                        ),
+                    )
+                )
             if runtime_log_error is not None:
                 main_window.block_start(
                     f"运行日志初始化失败：{runtime_log_error}"
@@ -591,6 +632,18 @@ class Application:
             root.mainloop()
         except BaseException as error:
             run_error = error
+            if services.diagnostic_reporter is not None:
+                try:
+                    services.diagnostic_reporter.request_report(
+                        report_type="automatic",
+                        code="E_APPLICATION",
+                        detail=str(error),
+                        state="应用异常",
+                        frame=None,
+                        context={"phase": "run"},
+                    )
+                except BaseException:
+                    pass
 
         cleanup_errors = self._cleanup(services, root)
         if run_error is not None:
@@ -682,6 +735,7 @@ class Application:
             scene_recognizer=scene_recognizer,
             diagnostics=diagnostics,
             runtime_log=runtime_log,
+            diagnostic_reporter=diagnostic_reporter,
         )
         return ApplicationServices(
             window_service=window_service,
@@ -723,6 +777,13 @@ class Application:
                 error.add_note("销毁 Tk 主窗口")
                 errors.append(error)
                 Application._record_cleanup_failure(services, "销毁 Tk 主窗口", error)
+
+        if services.diagnostic_reporter is not None:
+            try:
+                services.diagnostic_reporter.close(timeout=2.0)
+            except BaseException as error:
+                error.add_note("关闭诊断报告服务")
+                errors.append(error)
 
         if services.runtime_log is not None:
             try:
