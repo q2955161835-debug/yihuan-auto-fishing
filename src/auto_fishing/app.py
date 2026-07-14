@@ -13,6 +13,9 @@ from auto_fishing.model import FishingState, RuntimeSnapshot
 from auto_fishing.ui.main_window import MainWindow
 
 
+DEFAULT_DATA_DIR = Path(r"D:\29551\异环自动钓鱼数据")
+
+
 BindTick = Callable[[int], None]
 BindDone = Callable[[str | None, str | None], None]
 StartTick = Callable[[int], None]
@@ -518,9 +521,7 @@ class Application:
     def run(self) -> None:
         services = self._services
         if services is None:
-            data_dir = self._data_dir or (
-                Path(os.environ["LOCALAPPDATA"]) / "异环自动钓鱼"
-            )
+            data_dir = self._data_dir or DEFAULT_DATA_DIR
             services = self._build_services(data_dir)
 
         root: Any | None = None
@@ -609,13 +610,16 @@ class Application:
         )
         from auto_fishing.platform.windowing import WindowService
         from auto_fishing.storage.diagnostics import DiagnosticsStore
+        from auto_fishing.storage.quota import StorageQuotaManager
         from auto_fishing.storage.runtime_logging import RuntimeLogStore
         from auto_fishing.storage.settings import SettingsStore
         from auto_fishing.vision.progress import ProgressController
         from auto_fishing.vision.scenes import SceneRecognizer
 
         window_service = WindowService()
-        runtime_log = RuntimeLogStore(data_dir / "runs")
+        quota = StorageQuotaManager(data_dir)
+        quota.initialize()
+        runtime_log = RuntimeLogStore(data_dir / "runs", quota=quota)
         keyboard_window = OnScreenKeyboardWindow(recorder=runtime_log)
         safe_input = SafeInput(
             OnScreenKeyboardInputBackend(
@@ -633,7 +637,7 @@ class Application:
             scene_recognizer=scene_recognizer,
             event_recorder=runtime_log,
         )
-        diagnostics = DiagnosticsStore(data_dir / "diagnostics")
+        diagnostics = DiagnosticsStore(data_dir / "diagnostics", quota=quota)
         engine = AutomationEngine(
             core=core,
             window_service=window_service,
@@ -648,7 +652,7 @@ class Application:
             safe_input=safe_input,
             engine=engine,
             diagnostics=diagnostics,
-            settings=SettingsStore(data_dir / "config.json"),
+            settings=SettingsStore(data_dir / "config.json", quota=quota),
             runtime_log=runtime_log,
         )
 
