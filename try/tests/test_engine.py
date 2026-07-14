@@ -631,13 +631,23 @@ def single_round_observations(
     *,
     result_frames: int = 4,
 ) -> list[SceneObservation]:
-    progress = ProgressObservation(0.3, 0.7, 0.2, 1.0, 2.0)
     return [
         SceneObservation(),
         SceneObservation(bite=True),
-        # The first progress frame only changes WAIT_BAR to CONTROL; the next
-        # fifteen frames establish a stable bar before disappearance.
-        *[SceneObservation(progress=progress) for _ in range(16)],
+        # At 30 FPS this covers the 0.60-second entry gate, three-frame
+        # confirmation, and at least fifteen reliable control frames.
+        *[
+            SceneObservation(
+                progress=ProgressObservation(
+                    0.3,
+                    0.7,
+                    0.2,
+                    1.0,
+                    2.0 + index / 30,
+                )
+            )
+            for index in range(40)
+        ],
         *[clean_progress_disappearance() for _ in range(3)],
         *[SceneObservation() for _ in range(result_frames)],
     ]
@@ -1008,6 +1018,178 @@ def test_second_f_resets_progress_vision_before_waiting_for_bar() -> None:
     assert recognizer.progress_reset_calls == 1
 
 
+def test_progress_entry_ignores_diagnostic_false_hits_until_armed() -> None:
+    recognizer = ScriptedRecognizer()
+    input_service = RecordingInput()
+    state_machine = FishingStateMachine()
+    runtime_log = RecordingRuntimeLog()
+    core = AutomationCore(
+        state_machine=state_machine,
+        controller=ProgressController(),
+        input_service=input_service,
+        scene_recognizer=recognizer,
+        event_recorder=runtime_log,
+    )
+    core.start(1, 0.0)
+
+    def process(observation: SceneObservation, timestamp: float) -> None:
+        core.process(
+            observation,
+            FramePacket(
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+                timestamp,
+                30.0,
+            ),
+            timestamp,
+            CLIENT,
+        )
+
+    process(SceneObservation(), 0.01)
+    process(SceneObservation(bite=True), 0.02)
+    for index in range(19):
+        timestamp = 0.03 + index * 0.03
+        process(
+            SceneObservation(
+                progress=ProgressObservation(
+                    0.100,
+                    0.278,
+                    0.537,
+                    0.8,
+                    timestamp,
+                )
+            ),
+            timestamp,
+        )
+
+    assert core.snapshot.state is FishingState.WAIT_BAR
+    assert not ({"left", "right"} & set(input_service.events))
+    assert recognizer.progress_reset_calls >= 20
+
+    for timestamp in (0.64, 0.67):
+        process(
+            SceneObservation(
+                progress=ProgressObservation(
+                    0.38,
+                    0.42,
+                    0.40,
+                    1.0,
+                    timestamp,
+                )
+            ),
+            timestamp,
+        )
+        assert core.snapshot.state is FishingState.WAIT_BAR
+
+    process(
+        SceneObservation(
+            progress=ProgressObservation(0.38, 0.42, 0.40, 1.0, 0.70)
+        ),
+        0.70,
+    )
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert not ({"left", "right"} & set(input_service.events))
+    assert any(
+        event.get("event") == "progress.entry_confirmed"
+        for event in runtime_log.events
+    )
+
+
+def test_progress_entry_confirmation_resets_on_invalid_frame_timing() -> None:
+    recognizer = ScriptedRecognizer()
+    input_service = RecordingInput()
+    state_machine = FishingStateMachine()
+    core = AutomationCore(
+        state_machine=state_machine,
+        controller=ProgressController(),
+        input_service=input_service,
+        scene_recognizer=recognizer,
+    )
+    core.start(1, 0.0)
+
+    def process(timestamp: float, *, valid: bool = True) -> None:
+        progress = (
+            ProgressObservation(0.40, 0.412, 0.01, 0.8, timestamp)
+            if valid
+            else None
+        )
+        core.process(
+            SceneObservation(progress=progress),
+            FramePacket(
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+                timestamp,
+                30.0,
+            ),
+            timestamp,
+            CLIENT,
+        )
+
+    process(0.01)
+    core.process(
+        SceneObservation(bite=True),
+        FramePacket(
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+            0.02,
+            30.0,
+        ),
+        0.02,
+        CLIENT,
+    )
+    process(0.03)
+    process(0.64)
+    process(0.67, valid=False)
+    process(0.70)
+    process(0.70)
+    process(0.74)
+    process(0.98)
+    process(1.01)
+
+    assert core.snapshot.state is FishingState.WAIT_BAR
+
+    process(1.04)
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert not ({"left", "right"} & set(input_service.events))
+
+
+@pytest.mark.parametrize("yellow_x", [0.01, 0.406, 0.99])
+def test_progress_entry_keeps_narrow_bar_and_free_yellow_position(
+    yellow_x: float,
+) -> None:
+    core, input_service, state_machine = make_core()
+    core.start(1, 0.0)
+    state_machine.handle(Event.CAST_SENT, 0.01)
+    state_machine.handle(Event.REEL_SENT, 0.02)
+
+    def process(timestamp: float) -> None:
+        core.process(
+            SceneObservation(
+                progress=ProgressObservation(
+                    0.40,
+                    0.412,
+                    yellow_x,
+                    0.8,
+                    timestamp,
+                )
+            ),
+            FramePacket(
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+                timestamp,
+                30.0,
+            ),
+            timestamp,
+            CLIENT,
+        )
+
+    process(0.03)
+    process(0.64)
+    process(0.67)
+    process(0.70)
+
+    assert core.snapshot.state is FishingState.CONTROL
+    assert not ({"left", "right"} & set(input_service.events))
+
+
 def test_wait_result_resume_reschedules_delay_without_visual_recognition() -> None:
     samples: list[tuple[float, float]] = []
 
@@ -1325,9 +1507,9 @@ def test_engine_complete_exits_worker_and_allows_restart(tmp_path) -> None:
     engine.start(1)
     try:
         try:
-            wait_until(
-                lambda: core.snapshot.state is FishingState.COMPLETE,
-                timeout=5.0,
+                wait_until(
+                    lambda: core.snapshot.state is FishingState.COMPLETE,
+                    timeout=6.0,
             )
         except AssertionError as error:
             raise AssertionError(
@@ -1380,7 +1562,7 @@ def test_complete_publish_racing_shutdown_preserves_terminal_state(
 
     engine.subscribe(subscriber)
     engine.start(1)
-    assert complete_publish_entered.wait(timeout=5.0)
+    assert complete_publish_entered.wait(timeout=6.0)
     releases_before_shutdown = input_service.events.count("release")
     shutdown_thread = threading.Thread(target=engine.shutdown)
     shutdown_thread.start()
@@ -1413,7 +1595,7 @@ def test_pause_and_f8_after_worker_exit_preserve_complete(tmp_path) -> None:
 
     engine.start(1)
     try:
-        wait_until(lambda: engine.is_running is False, timeout=5.0)
+        wait_until(lambda: engine.is_running is False, timeout=6.0)
         releases_before_pause = input_service.events.count("release")
 
         engine.pause("按钮暂停")

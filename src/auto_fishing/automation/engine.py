@@ -32,6 +32,9 @@ _RESULT_CLICK_DELAY_MIN = 3.10
 _RESULT_CLICK_DELAY_MAX = 3.60
 _STRUCTURED_PROGRESS_LOSS_LIMIT = 60
 _BLANK_PROGRESS_LOSS_LIMIT = 60
+_PROGRESS_ENTRY_DELAY = 0.60
+_PROGRESS_ENTRY_CONFIRM_FRAMES = 3
+_PROGRESS_ENTRY_MAX_FRAME_GAP = 0.20
 
 
 class InputActionError(RuntimeError):
@@ -76,6 +79,9 @@ class AutomationCore:
         self.structured_missing_frames = 0
         self.blank_missing_frames = 0
         self.bar_valid_frames = 0
+        self._progress_entry_armed_at: float | None = None
+        self._progress_entry_confirm_frames = 0
+        self._progress_entry_last_timestamp: float | None = None
         self.result_next_click_at: float | None = None
         self.pause_code = ""
         self._error = ""
@@ -98,6 +104,7 @@ class AutomationCore:
         with self._lock:
             self.state_machine.start(target, now)
             self._reset_progress_tracking()
+            self._reset_progress_entry()
             self.bar_valid_frames = 0
             self._reset_result_dismissal()
             self.pause_code = ""
@@ -191,6 +198,7 @@ class AutomationCore:
                 raise InputActionError(str(error)) from error
             self.state_machine.cancel_current(now)
             self._reset_progress_tracking()
+            self._reset_progress_entry()
             self.bar_valid_frames = 0
             self._reset_result_dismissal()
             self.pause_code = ""
@@ -252,9 +260,10 @@ class AutomationCore:
         elif state is FishingState.WAIT_BITE and observation.bite:
             self._input(self.input_service.tap_f)
             self.state_machine.handle(Event.REEL_SENT, now)
+            self._reset_progress_entry()
             self.scene_recognizer.reset_progress_tracking()
-        elif state is FishingState.WAIT_BAR and observation.progress is not None:
-            self.state_machine.handle(Event.BAR_DETECTED, now)
+        elif state is FishingState.WAIT_BAR:
+            self._await_progress_entry(observation, packet, now)
         elif state is FishingState.CONTROL:
             self._control(observation, now)
         elif state is FishingState.WAIT_RESULT:
@@ -335,6 +344,7 @@ class AutomationCore:
 
     def _enter_wait_result(self, now: float) -> None:
         self.state_machine.handle(Event.BAR_GONE, now)
+        self._reset_progress_entry()
         self._reset_result_dismissal()
         self._schedule_result_click(
             now,
@@ -424,6 +434,96 @@ class AutomationCore:
     def _reset_progress_tracking(self) -> None:
         self.structured_missing_frames = 0
         self.blank_missing_frames = 0
+
+    def _reset_progress_entry(self) -> None:
+        self._progress_entry_armed_at = None
+        self._progress_entry_confirm_frames = 0
+        self._progress_entry_last_timestamp = None
+
+    def _reset_progress_entry_confirmation(self) -> None:
+        self._progress_entry_confirm_frames = 0
+        self._progress_entry_last_timestamp = None
+        self.controller.decide(None)
+        self.scene_recognizer.reset_progress_tracking()
+
+    def _hold_progress_entry(self) -> None:
+        self.controller.decide(None)
+        self._input(self.input_service.release_all)
+
+    def _await_progress_entry(
+        self,
+        observation: SceneObservation,
+        packet: FramePacket | None,
+        now: float,
+    ) -> None:
+        if self._progress_entry_armed_at is None:
+            self._progress_entry_armed_at = now + _PROGRESS_ENTRY_DELAY
+            self._reset_progress_entry_confirmation()
+            self._record(
+                "progress.entry_armed",
+                delay_seconds=_PROGRESS_ENTRY_DELAY,
+                required_frames=_PROGRESS_ENTRY_CONFIRM_FRAMES,
+                armed_at=self._progress_entry_armed_at,
+            )
+
+        if now < self._progress_entry_armed_at:
+            self._reset_progress_entry_confirmation()
+            self._hold_progress_entry()
+            self._record(
+                "progress.entry_ignored",
+                reason="arming",
+                remaining=max(0.0, self._progress_entry_armed_at - now),
+            )
+            return
+
+        progress = observation.progress
+        if progress is None:
+            self._reset_progress_entry_confirmation()
+            self._hold_progress_entry()
+            self._record(
+                "progress.entry_ignored",
+                reason="progress_missing",
+            )
+            return
+
+        timestamp = packet.timestamp if packet is not None else progress.timestamp
+        previous = self._progress_entry_last_timestamp
+        if previous is not None and timestamp <= previous:
+            self._reset_progress_entry_confirmation()
+            self._hold_progress_entry()
+            self._record(
+                "progress.entry_ignored",
+                reason="non_increasing_timestamp",
+                frame_timestamp=timestamp,
+                previous_timestamp=previous,
+            )
+            return
+
+        if (
+            previous is not None
+            and timestamp - previous > _PROGRESS_ENTRY_MAX_FRAME_GAP
+        ):
+            self._reset_progress_entry_confirmation()
+
+        self._progress_entry_confirm_frames += 1
+        self._progress_entry_last_timestamp = timestamp
+        self._hold_progress_entry()
+        self._record(
+            "progress.entry_confirming",
+            count=self._progress_entry_confirm_frames,
+            required_frames=_PROGRESS_ENTRY_CONFIRM_FRAMES,
+            frame_timestamp=timestamp,
+        )
+        if self._progress_entry_confirm_frames < _PROGRESS_ENTRY_CONFIRM_FRAMES:
+            return
+
+        self.state_machine.handle(Event.BAR_DETECTED, now)
+        self._record(
+            "progress.entry_confirmed",
+            count=self._progress_entry_confirm_frames,
+            frame_timestamp=timestamp,
+        )
+        self._reset_progress_entry()
 
     def _record(self, name: str, **fields: object) -> None:
         if self.event_recorder is not None:
