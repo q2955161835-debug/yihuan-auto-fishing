@@ -699,6 +699,11 @@ def make_core(
     return core, input_service, state_machine
 
 
+def frame_packet(timestamp: float) -> FramePacket:
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    return FramePacket(frame, timestamp, 30.0)
+
+
 def test_input_target_unavailable_is_a_window_error_not_input_error() -> None:
     core, input_service, _state_machine = make_core(
         state=FishingState.READY
@@ -1079,6 +1084,105 @@ def test_inter_round_interval_precedes_generic_timeout() -> None:
 
     assert core.snapshot.state is FishingState.WAIT_BITE
     assert input_service.events.count("F") == 1
+
+
+def test_ready_guard_recasts_without_treating_false_bite_as_reel() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, _state_machine = make_core(event_recorder=runtime_log)
+    core.start(1, 0.0)
+
+    core.process(SceneObservation(), frame_packet(0.1), 0.1, CLIENT)
+    core.process(
+        SceneObservation(ready=True, bite=True),
+        frame_packet(1.6),
+        1.6,
+        CLIENT,
+    )
+    core.process(SceneObservation(bite=True), frame_packet(2.39), 2.39, CLIENT)
+
+    assert input_service.events.count("F") == 1
+    assert core.snapshot.state is FishingState.WAIT_BITE
+
+    core.process(SceneObservation(), frame_packet(2.401), 2.401, CLIENT)
+
+    assert input_service.events.count("F") == 2
+    assert core.snapshot.state is FishingState.WAIT_BITE
+
+    core.process(SceneObservation(bite=True), frame_packet(4.001), 4.001, CLIENT)
+
+    assert input_service.events.count("F") == 3
+    assert core.snapshot.state is FishingState.WAIT_BAR
+    assert [event["event"] for event in runtime_log.events] == [
+        "cast.attempt",
+        "cast.recovery_scheduled",
+        "cast.attempt",
+    ]
+
+
+def test_ready_guard_pauses_after_three_unaccepted_casts() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, _state_machine = make_core(event_recorder=runtime_log)
+    core.start(1, 0.0)
+
+    core.process(SceneObservation(), frame_packet(0.1), 0.1, CLIENT)
+    core.process(SceneObservation(ready=True), frame_packet(1.6), 1.6, CLIENT)
+    core.process(SceneObservation(), frame_packet(2.401), 2.401, CLIENT)
+    core.process(SceneObservation(ready=True), frame_packet(4.001), 4.001, CLIENT)
+    core.process(SceneObservation(), frame_packet(4.802), 4.802, CLIENT)
+    core.process(SceneObservation(ready=True), frame_packet(6.402), 6.402, CLIENT)
+
+    assert input_service.events.count("F") == 3
+    assert core.snapshot.state is FishingState.PAUSED
+    assert core.pause_code == "E_CAST"
+    assert input_service.events[-1] == "release"
+    exhausted = [
+        event
+        for event in runtime_log.events
+        if event["event"] == "cast.recovery_exhausted"
+    ]
+    assert len(exhausted) == 1
+    assert exhausted[0]["attempts"] == 3
+
+
+def test_ready_guard_does_not_override_bite_after_four_seconds() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, _state_machine = make_core(event_recorder=runtime_log)
+    core.start(1, 0.0)
+
+    core.process(SceneObservation(), frame_packet(0.1), 0.1, CLIENT)
+    core.process(
+        SceneObservation(ready=True, bite=True),
+        frame_packet(4.101),
+        4.101,
+        CLIENT,
+    )
+
+    assert input_service.events.count("F") == 2
+    assert core.snapshot.state is FishingState.WAIT_BAR
+    assert not any(
+        event["event"] == "cast.recovery_scheduled"
+        for event in runtime_log.events
+    )
+
+
+def test_restart_round_discards_pending_cast_recovery() -> None:
+    runtime_log = RecordingRuntimeLog()
+    core, input_service, _state_machine = make_core(event_recorder=runtime_log)
+    core.start(1, 0.0)
+    core.process(SceneObservation(), frame_packet(0.1), 0.1, CLIENT)
+    core.process(SceneObservation(ready=True), frame_packet(1.6), 1.6, CLIENT)
+    core.pause("用户暂停", 1.7)
+
+    assert core.restart_round(10.0) is True
+    core.process(SceneObservation(), frame_packet(10.1), 10.1, CLIENT)
+    core.process(SceneObservation(bite=True), frame_packet(10.2), 10.2, CLIENT)
+
+    assert input_service.events.count("F") == 3
+    assert core.snapshot.state is FishingState.WAIT_BAR
+    attempts = [
+        event for event in runtime_log.events if event["event"] == "cast.attempt"
+    ]
+    assert [event["attempt"] for event in attempts] == [1, 1]
 
 
 def test_second_f_resets_progress_vision_before_waiting_for_bar() -> None:
