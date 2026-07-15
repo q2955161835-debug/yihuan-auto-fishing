@@ -42,6 +42,7 @@ _OSK_CLASS = "OSKMainClass"
 _HWND_TOPMOST = -1
 _SWP_SHOWWINDOW = 0x0040
 _WM_CLOSE = 0x0010
+_ERROR_INVALID_WINDOW_HANDLE = 1400
 _CANONICAL_OUTER_WIDTH = 1365
 _CANONICAL_OUTER_HEIGHT = 415
 _MIN_CLIENT_WIDTH = 900
@@ -209,6 +210,8 @@ class Win32KeyboardApi:
     def close_window(self, hwnd: int) -> None:
         if not self.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0):
             error_code = ctypes.get_last_error()
+            if error_code == _ERROR_INVALID_WINDOW_HANDLE:
+                return
             error_type = (
                 OnScreenKeyboardCloseDenied
                 if error_code == 5

@@ -158,6 +158,39 @@ def test_tap_f_does_not_press_when_pre_delay_sleep_fails() -> None:
     assert backend.events == []
 
 
+def test_target_guard_blocks_f_when_focus_is_lost_during_pre_press_delay() -> None:
+    focus = {"game": True}
+    backend = FakeBackend()
+    safe = SafeInput(
+        backend,
+        sleep=lambda _seconds: focus.__setitem__("game", False),
+        random_uniform=lambda _lower, _upper: 0.10,
+    )
+    safe.set_target_guard(lambda: focus["game"])
+
+    with pytest.raises(Exception, match="Windows 系统弹窗") as caught:
+        safe.tap_f()
+
+    assert caught.type.__name__ == "InputTargetUnavailable"
+    assert backend.events == []
+
+
+def test_target_guard_blocks_click_but_never_blocks_release_after_focus_loss() -> None:
+    focus = {"game": True}
+    backend = FakeBackend()
+    safe = SafeInput(backend, sleep=lambda _: None)
+    safe.set_target_guard(lambda: focus["game"])
+    safe.set_direction(Direction.LEFT)
+    focus["game"] = False
+
+    safe.release_all()
+    with pytest.raises(Exception, match="Windows 系统弹窗") as caught:
+        safe.click(200, 300)
+
+    assert caught.type.__name__ == "InputTargetUnavailable"
+    assert backend.events == [("down", "A"), ("up", "A")]
+
+
 class FakeUser32:
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []

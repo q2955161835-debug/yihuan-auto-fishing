@@ -13,6 +13,7 @@ import pytest
 from auto_fishing.automation.engine import (
     AutomationCore,
     AutomationEngine,
+    ForegroundLostError,
     InputActionError,
 )
 from auto_fishing.automation.state_machine import Event, FishingStateMachine
@@ -24,7 +25,7 @@ from auto_fishing.model import (
     Rect,
     SceneObservation,
 )
-from auto_fishing.platform.input import InputFailure
+from auto_fishing.platform.input import InputFailure, InputTargetUnavailable
 from auto_fishing.platform.windowing import BoundWindow
 from auto_fishing.storage.diagnostics import DiagnosticsStore
 from auto_fishing.storage.runtime_logging import RuntimeLogError
@@ -44,6 +45,7 @@ class RecordingInput:
         self.prepared: list[tuple[Rect, Rect]] = []
         self.occlusion: Rect | None = None
         self.occlusion_error: Exception | None = None
+        self.target_guard: Callable[[], bool] | None = None
 
     def _record(self, event: object) -> None:
         if self.failure is not None:
@@ -70,6 +72,9 @@ class RecordingInput:
         if self.occlusion_error is not None:
             raise self.occlusion_error
         return self.occlusion
+
+    def set_target_guard(self, guard: Callable[[], bool] | None) -> None:
+        self.target_guard = guard
 
 
 class RecordingReporter:
@@ -175,6 +180,13 @@ class ForegroundDropsAfterStartWindowService(RecordingWindowService):
     def is_foreground(self, bound: BoundWindow) -> bool:
         self.foreground_checks += 1
         return self.foreground_checks == 1 and super().is_foreground(bound)
+
+
+class ControlForegroundAfterStartWindowService(
+    ForegroundDropsAfterStartWindowService
+):
+    def is_control_foreground(self) -> bool:
+        return True
 
 
 class ActivatingWindowService(RecordingWindowService):
@@ -687,6 +699,18 @@ def make_core(
     return core, input_service, state_machine
 
 
+def test_input_target_unavailable_is_a_window_error_not_input_error() -> None:
+    core, input_service, _state_machine = make_core(
+        state=FishingState.READY
+    )
+    input_service.failure = InputTargetUnavailable(
+        "游戏窗口已失去前台，可能被 Windows 系统弹窗遮挡"
+    )
+
+    with pytest.raises(ForegroundLostError, match="Windows 系统弹窗"):
+        core.process(SceneObservation(), None, 0.1, CLIENT)
+
+
 def enter_wait_result(
     core: AutomationCore,
     state_machine: FishingStateMachine,
@@ -756,6 +780,66 @@ def make_engine(
     if bind:
         engine.bind(BOUND)
     return engine, core, input_service, window_service, frame_source
+
+
+def test_engine_bind_installs_live_foreground_guard(tmp_path) -> None:
+    input_service = RecordingInput()
+    window_service = RecordingWindowService()
+
+    make_engine(
+        tmp_path,
+        input_service=input_service,
+        window_service=window_service,
+    )
+
+    assert input_service.target_guard is not None
+    assert input_service.target_guard() is True
+    window_service.foreground = False
+    assert input_service.target_guard() is False
+
+
+def test_control_window_foreground_is_user_pause_without_diagnostic(
+    tmp_path,
+) -> None:
+    reporter = RecordingReporter()
+    window_service = ControlForegroundAfterStartWindowService()
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+        diagnostic_reporter=reporter,
+    )
+
+    try:
+        engine.start(1)
+        wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+
+        assert core.pause_code == "E_USER_PAUSE"
+        assert "控制窗口" in core.snapshot.error
+        assert reporter.requests == []
+    finally:
+        engine.shutdown()
+
+
+def test_other_foreground_window_mentions_system_popup_and_reports_error(
+    tmp_path,
+) -> None:
+    reporter = RecordingReporter()
+    window_service = ForegroundDropsAfterStartWindowService()
+    engine, core, _input, _window, _source = make_engine(
+        tmp_path,
+        window_service=window_service,
+        diagnostic_reporter=reporter,
+    )
+
+    try:
+        engine.start(1)
+        wait_until(lambda: core.snapshot.state is FishingState.PAUSED)
+
+        assert core.pause_code == "E_WINDOW"
+        assert "Windows 系统弹窗" in core.snapshot.error
+        assert reporter.requests[0]["code"] == "E_WINDOW"
+    finally:
+        engine.shutdown()
 
 
 def test_engine_auto_error_reports_once_after_inputs_are_released(tmp_path) -> None:

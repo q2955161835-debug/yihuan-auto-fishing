@@ -321,6 +321,15 @@ def test_bind_foreground_rejects_own_control_window() -> None:
         make_window_service(user32, own_hwnd=100).bind_foreground()
 
 
+def test_control_window_foreground_is_detected_separately() -> None:
+    user32 = FakeUser32()
+    service = make_window_service(user32, own_hwnd=900)
+
+    user32.foreground = 900
+
+    assert service.is_control_foreground() is True
+
+
 @pytest.mark.parametrize(
     "outputs",
     [

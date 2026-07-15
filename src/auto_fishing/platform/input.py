@@ -14,6 +14,10 @@ class InputFailure(RuntimeError):
     """Raised when Windows does not accept a requested input action."""
 
 
+class InputTargetUnavailable(InputFailure):
+    """Raised before new input when the game cannot safely receive it."""
+
+
 ULONG_PTR = wintypes.WPARAM
 
 
@@ -187,8 +191,28 @@ class SafeInput:
         self.held: set[str] = set()
         self.mouse_held = False
         self._cancel_generation = 0
+        self._target_guard: Callable[[], bool] | None = None
+
+    def set_target_guard(self, guard: Callable[[], bool] | None) -> None:
+        self._target_guard = guard
+
+    def _ensure_target_available(self) -> None:
+        guard = self._target_guard
+        if guard is None:
+            return
+        try:
+            available = bool(guard())
+        except Exception as error:
+            raise InputTargetUnavailable(
+                f"无法确认游戏窗口前台状态: {error}"
+            ) from error
+        if not available:
+            raise InputTargetUnavailable(
+                "游戏窗口已失去前台，可能被 Windows 系统弹窗或其他窗口遮挡"
+            )
 
     def _down(self, key: str) -> None:
+        self._ensure_target_available()
         if key not in self.held:
             self._record("input.request", action="key_down", key=key)
             self.backend.key_down(key)
@@ -243,6 +267,7 @@ class SafeInput:
             self._down(desired)
 
     def click(self, x: int, y: int) -> None:
+        self._ensure_target_available()
         self._record("input.request", action="click", x=x, y=y)
         self.mouse_held = True
         try:

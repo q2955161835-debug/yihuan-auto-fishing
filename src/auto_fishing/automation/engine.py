@@ -23,6 +23,7 @@ from auto_fishing.model import (
     RuntimeSnapshot,
     SceneObservation,
 )
+from auto_fishing.platform.input import InputTargetUnavailable
 from auto_fishing.storage.runtime_logging import RuntimeLogError
 from auto_fishing.vision.geometry import crop_normalized
 from auto_fishing.vision.regions import TOP_ROI
@@ -55,6 +56,10 @@ class VisionActionError(RuntimeError):
 
 class WindowActionError(RuntimeError):
     """The bound game window cannot safely receive input."""
+
+
+class ForegroundLostError(WindowActionError):
+    """The game lost foreground immediately before a new input action."""
 
 
 class CaptureActionError(RuntimeError):
@@ -285,6 +290,8 @@ class AutomationCore:
                 return
             try:
                 action()
+            except InputTargetUnavailable as error:
+                raise ForegroundLostError(str(error)) from error
             except Exception as error:
                 raise InputActionError(str(error)) from error
 
@@ -631,6 +638,13 @@ class AutomationEngine:
             except Exception as error:
                 raise RuntimeError(f"屏幕键盘准备失败: {error}") from error
             self._bound = bound
+            set_target_guard = getattr(
+                self.core.input_service,
+                "set_target_guard",
+                None,
+            )
+            if set_target_guard is not None:
+                set_target_guard(self._input_target_is_foreground)
         self._runtime_event(
             "automation.bound",
             title=getattr(bound, "title", ""),
@@ -1119,6 +1133,14 @@ class AutomationEngine:
                     )
                     self._shutdown_event.wait(0.005)
                     continue
+                except ForegroundLostError as error:
+                    self._pause_foreground_interruption(
+                        error,
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    self._shutdown_event.wait(0.005)
+                    continue
                 except Exception as error:
                     self._pause(
                         "E_WINDOW",
@@ -1278,6 +1300,13 @@ class AutomationEngine:
                     self._pause(
                         "E_VISION",
                         str(error),
+                        packet.frame,
+                        expected_epoch=frame_epoch,
+                    )
+                    continue
+                except ForegroundLostError as error:
+                    self._pause_foreground_interruption(
+                        error,
                         packet.frame,
                         expected_epoch=frame_epoch,
                     )
@@ -1642,7 +1671,7 @@ class AutomationEngine:
         self, bound: Any, now: float
     ) -> tuple[Any, bool]:
         if not self.window_service.is_foreground(bound):
-            raise WindowActionError("游戏窗口已失去前台")
+            raise ForegroundLostError("游戏窗口已失去前台")
         if now - self._last_refresh < 0.5:
             return bound, False
 
@@ -1678,6 +1707,46 @@ class AutomationEngine:
             return refreshed, True
         self._bound = refreshed
         return refreshed, False
+
+    def _input_target_is_foreground(self) -> bool:
+        bound = self._bound
+        return bound is not None and bool(
+            self.window_service.is_foreground(bound)
+        )
+
+    def _pause_foreground_interruption(
+        self,
+        error: BaseException,
+        frame: np.ndarray | None,
+        *,
+        expected_epoch: int | None = None,
+    ) -> bool:
+        try:
+            control_foreground = bool(
+                self.window_service.is_control_foreground()
+            )
+        except Exception:
+            control_foreground = False
+        if control_foreground:
+            return self._pause(
+                "E_USER_PAUSE",
+                "控制窗口已取得前台，自动化已安全暂停",
+                frame,
+                save_diagnostic=False,
+                expected_epoch=expected_epoch,
+            )
+        detail = (
+            "检测到 Windows 系统弹窗或其他窗口抢占前台，"
+            "自动化已安全暂停；关闭弹窗后点击继续"
+        )
+        if "无法确认" in str(error):
+            detail = f"{detail}；{error}"
+        return self._pause(
+            "E_WINDOW",
+            detail,
+            frame,
+            expected_epoch=expected_epoch,
+        )
 
     @staticmethod
     def _crop_client(frame: np.ndarray, bound: Any) -> np.ndarray:
