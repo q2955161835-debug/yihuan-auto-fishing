@@ -7,9 +7,9 @@
 
 ## 当前版本
 
-- 最新正式发布版：[`v2.0.1`](https://github.com/q2955161835-debug/yihuan-auto-fishing/releases/tag/v2.0.1)，已完成用户真实游戏确认。
-- `main` 当前候选源码：`v2.0.4`，已通过 428 项离线测试和 Windows 11 单文件构建校验。
-- `v2.0.4` 仍待提升权限烟雾、真实游戏 Windows 弹窗与完整闭环复验，因此尚未创建标签或 Release。
+- 最新正式发布版：[`v2.0.4`](https://github.com/q2955161835-debug/yihuan-auto-fishing/releases/tag/v2.0.4)，已经用户真实游戏验证，并确认为当前最稳定版本。
+- `v2.0.4` 已通过 428 项自动测试、180 张最新诊断进度槽回放、412 帧历史控制回放和 Windows 11 单文件构建校验。
+- 本版本改进绿色目标区识别，并加强 Windows 弹窗抢占前台时的输入安全与程序退出清理。
 - Windows 10 真机仍待人工确认。
 
 ## 功能
