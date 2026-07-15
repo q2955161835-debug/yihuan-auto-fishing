@@ -464,9 +464,9 @@ class MainWindow:
             auto_activate_game=bool(self.auto_activate_var.get()),
         )
         try:
-            self.settings_store.save(settings)
+            self.controller.shutdown()
         finally:
             try:
-                self.controller.shutdown()
+                self.settings_store.save(settings)
             finally:
                 self.root.destroy()

@@ -370,6 +370,19 @@ def test_win32_api_closes_owned_keyboard_with_wm_close() -> None:
     assert user32.messages == [(55, 0x0010)]
 
 
+def test_win32_api_treats_invalid_window_handle_as_already_closed(
+    monkeypatch,
+) -> None:
+    user32 = FakeUser32()
+    user32.post_result = 0
+    monkeypatch.setattr("ctypes.get_last_error", lambda: 1400)
+    api = Win32KeyboardApi(user32=user32)
+
+    api.close_window(55)
+
+    assert user32.messages == [(55, 0x0010)]
+
+
 def test_win32_api_distinguishes_access_denied_position_error(monkeypatch) -> None:
     user32 = FakeUser32()
     user32.position_result = 0

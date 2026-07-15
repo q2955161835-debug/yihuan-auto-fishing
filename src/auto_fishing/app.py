@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -657,7 +658,10 @@ class Application:
                 )
             raise run_error.with_traceback(run_error.__traceback__)
         if cleanup_errors:
-            raise BaseExceptionGroup("程序关闭清理失败", cleanup_errors)
+            logging.getLogger(__name__).error(
+                "程序关闭清理失败: %s",
+                "; ".join(str(error) for error in cleanup_errors),
+            )
 
     @staticmethod
     def _build_services(
@@ -782,6 +786,39 @@ class Application:
                 Application._record_cleanup_failure(services, "销毁 Tk 主窗口", error)
 
         if services.diagnostic_reporter is not None:
+            if errors:
+                cleanup_context = [
+                    {
+                        "error_type": type(error).__name__,
+                        "detail": str(error),
+                        "notes": list(getattr(error, "__notes__", ())),
+                    }
+                    for error in errors
+                ]
+                try:
+                    services.diagnostic_reporter.request_report(
+                        report_type="automatic",
+                        code="E_CLEANUP",
+                        detail="；".join(
+                            f"{item['error_type']}: {item['detail']}"
+                            for item in cleanup_context
+                        ),
+                        state="程序关闭",
+                        frame=None,
+                        context={
+                            "phase": "cleanup",
+                            "cleanup_error_count": len(cleanup_context),
+                            "cleanup_errors": cleanup_context,
+                        },
+                    ).result(timeout=2.0)
+                except BaseException as error:
+                    error.add_note("保存关闭异常诊断")
+                    errors.append(error)
+                    Application._record_cleanup_failure(
+                        services,
+                        "保存关闭异常诊断",
+                        error,
+                    )
             try:
                 services.diagnostic_reporter.close(timeout=2.0)
             except BaseException as error:

@@ -390,6 +390,26 @@ def test_close_saves_position_and_shuts_down_controller(root) -> None:
     assert root.winfo_exists() == 0
 
 
+def test_close_stops_controller_before_saving_settings(root) -> None:
+    events: list[str] = []
+
+    class OrderedController(FakeController):
+        def shutdown(self) -> None:
+            events.append("shutdown")
+            super().shutdown()
+
+    class OrderedSettings(FakeSettings):
+        def save(self, settings: AppSettings) -> None:
+            events.append("save")
+            super().save(settings)
+
+    window = MainWindow(root, OrderedController(), OrderedSettings())
+
+    window.close()
+
+    assert events == ["shutdown", "save"]
+
+
 def test_auto_activate_setting_is_visible_and_saved(root) -> None:
     root.withdraw()
     controller = FakeController()
@@ -1439,6 +1459,7 @@ def test_application_records_cleanup_failure_before_closing_runtime_log() -> Non
     events: list[object] = []
     root = AppRoot(events)
     runtime_log = AppRuntimeLog(events)
+    reporter = AppReporter(events)
     services = ApplicationServices(
         window_service=AppWindowService(events),
         hotkey=AppHotkey(events, succeeds=True),
@@ -1447,16 +1468,16 @@ def test_application_records_cleanup_failure_before_closing_runtime_log() -> Non
         diagnostics=AppDiagnostics(events),
         settings=FakeSettings(),
         runtime_log=runtime_log,
+        diagnostic_reporter=reporter,
     )
 
-    with pytest.raises(BaseExceptionGroup, match="程序关闭清理失败"):
-        Application(
-            services=services,
-            root_factory=lambda: root,
-            main_window_factory=lambda root, controller, settings: AppMainWindow(
-                root, controller, settings, events
-            ),
-        ).run()
+    Application(
+        services=services,
+        root_factory=lambda: root,
+        main_window_factory=lambda root, controller, settings: AppMainWindow(
+            root, controller, settings, events
+        ),
+    ).run()
 
     failure = (
         "runtime_log.event",
@@ -1469,6 +1490,18 @@ def test_application_records_cleanup_failure_before_closing_runtime_log() -> Non
     )
     assert failure in events
     assert events.index(failure) < events.index("runtime_log.close")
+    assert reporter.requests[0]["code"] == "E_CLEANUP"
+    assert reporter.requests[0]["context"] == {
+        "phase": "cleanup",
+        "cleanup_error_count": 1,
+        "cleanup_errors": [
+            {
+                "error_type": "OSError",
+                "detail": "关闭屏幕键盘失败",
+                "notes": ["关闭屏幕键盘输入"],
+            }
+        ],
+    }
 
 
 def test_application_blocks_start_when_runtime_log_initialization_fails() -> None:
