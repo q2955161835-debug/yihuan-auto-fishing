@@ -102,20 +102,20 @@ def test_duplicate_result_click_does_not_repeat_success_count() -> None:
     assert state_machine.completed == 1
 
 
-def test_inter_round_waits_one_second_before_returning_ready() -> None:
+def test_inter_round_waits_three_point_five_seconds_before_returning_ready() -> None:
     state_machine = FishingStateMachine()
     state_machine.start(2, 0.0)
     advance_round_to_result_clicked(state_machine, 1.0)
 
     assert state_machine.state is FishingState.INTER_ROUND
-    assert state_machine.check_interval(1.999) is False
-    assert state_machine.check_interval(2.0) is True
+    assert state_machine.check_interval(4.499) is False
+    assert state_machine.check_interval(4.5) is True
     assert state_machine.state is FishingState.INTER_ROUND
 
-    state_machine.handle(Event.INTERVAL_ELAPSED, 2.0)
+    state_machine.handle(Event.INTERVAL_ELAPSED, 4.5)
 
     assert state_machine.state is FishingState.READY
-    assert state_machine.entered_at == 2.0
+    assert state_machine.entered_at == 4.5
 
 
 def test_inter_round_is_not_a_generic_timeout_state() -> None:
@@ -129,7 +129,7 @@ def test_early_inter_round_event_is_illegal_without_mutation() -> None:
     before = stateful_values(state_machine)
 
     with pytest.raises(ValueError, match="INTERVAL_ELAPSED"):
-        state_machine.handle(Event.INTERVAL_ELAPSED, 1.999)
+        state_machine.handle(Event.INTERVAL_ELAPSED, 4.499)
 
     assert stateful_values(state_machine) == before
 

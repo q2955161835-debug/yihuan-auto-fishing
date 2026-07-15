@@ -1071,9 +1071,11 @@ def test_inter_round_interval_precedes_generic_timeout() -> None:
     state_machine.handle(Event.BAR_GONE, 0.4)
     state_machine.handle(Event.RESULT_CLICKED, 1.0)
 
-    core.process(SceneObservation(), None, 2.001, CLIENT)
+    core.process(SceneObservation(), None, 4.499, CLIENT)
+    assert core.snapshot.state is FishingState.INTER_ROUND
+    core.process(SceneObservation(), None, 4.5, CLIENT)
     assert core.snapshot.state is FishingState.READY
-    core.process(SceneObservation(), None, 2.002, CLIENT)
+    core.process(SceneObservation(), None, 4.501, CLIENT)
 
     assert core.snapshot.state is FishingState.WAIT_BITE
     assert input_service.events.count("F") == 1
