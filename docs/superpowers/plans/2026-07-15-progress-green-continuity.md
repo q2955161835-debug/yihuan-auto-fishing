@@ -157,7 +157,6 @@ powershell -ExecutionPolicy Bypass -File scripts/build_v2.ps1 -PythonPath C:\Use
 
 Expected: 全量测试再次通过、PyInstaller 成功、清单输出 `requireAdministrator uiAccess=false dpi=PerMonitorV2 fallback=true/pm` 并给出 SHA256。
 
-- [ ] **Step 6: 复核、替换并合并主线**
+- [x] **Step 6: 复核、替换并合并主线**
 
 验证 `dist` 发布物后复制到根目录，比较两者大小、SHA256 和内嵌清单；若失败，从备份恢复。提交任务分支，合并回 `main`，运行最终定向测试并删除任务分支；未提升的 PowerShell 不冒用旧烟雾证据。
-
