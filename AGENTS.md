@@ -6,7 +6,8 @@
 - 项目目标：提供 Windows 单文件可执行程序，通过画面识别和系统输入完成《异环》钓鱼循环。
 - 使用前提：自动化期间游戏保持前台，用户不操作鼠标键盘；F8 为全局紧急暂停键。
 - 范围边界：不读取游戏内存、不注入游戏进程、不规避反作弊，只使用屏幕截图和 Windows 标准输入接口。
-- GitHub：私有仓库 `https://github.com/q2955161835-debug/yihuan-auto-fish`；默认分支为 `main`，当前本地 `main` 跟踪 `origin/main`。
+- GitHub：公开仓库 `https://github.com/q2955161835-debug/yihuan-auto-fishing`；默认分支为 `main`，当前本地 `main` 跟踪 `origin/main`。
+- 对外说明与授权：根目录 `README.md` 是安装、使用、诊断与源码构建入口；`LICENSE` 使用 PolyForm Noncommercial License 1.0.0，仅授权非商业用途，且本项目不属于 OSI 认可的开源软件。
 
 ## 技术栈与关键依赖
 
