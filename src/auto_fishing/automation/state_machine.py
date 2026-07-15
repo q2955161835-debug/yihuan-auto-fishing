@@ -30,7 +30,7 @@ TIMEOUTS = {
     FishingState.WAIT_RESULT: 10.0,
 }
 
-_INTER_ROUND_DELAY = 1.0
+_INTER_ROUND_DELAY = 3.5
 
 
 class FishingStateMachine:

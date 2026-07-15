@@ -36,6 +36,10 @@ _BLANK_PROGRESS_LOSS_LIMIT = 60
 _PROGRESS_ENTRY_DELAY = 0.60
 _PROGRESS_ENTRY_CONFIRM_FRAMES = 3
 _PROGRESS_ENTRY_MAX_FRAME_GAP = 0.20
+_CAST_READY_GUARD_MIN = 1.50
+_CAST_READY_GUARD_MAX = 4.00
+_CAST_RECOVERY_DELAY = 0.80
+_CAST_MAX_ATTEMPTS = 3
 
 
 def _held_keys(input_service: Any) -> list[str]:
@@ -95,6 +99,9 @@ class AutomationCore:
         self._progress_entry_armed_at: float | None = None
         self._progress_entry_confirm_frames = 0
         self._progress_entry_last_timestamp: float | None = None
+        self._cast_attempts = 0
+        self._cast_sent_at: float | None = None
+        self._cast_recovery_at: float | None = None
         self.result_next_click_at: float | None = None
         self.pause_code = ""
         self._error = ""
@@ -116,6 +123,7 @@ class AutomationCore:
     def start(self, target: int, now: float) -> None:
         with self._lock:
             self.state_machine.start(target, now)
+            self._reset_cast_recovery()
             self._reset_progress_tracking()
             self._reset_progress_entry()
             self.bar_valid_frames = 0
@@ -183,6 +191,7 @@ class AutomationCore:
                 raise InputActionError(str(error)) from error
             if not self.state_machine.restart_round(now):
                 return False
+            self._reset_cast_recovery()
             self._reset_progress_tracking()
             self._reset_progress_entry()
             self.controller.decide(None)
@@ -205,6 +214,7 @@ class AutomationCore:
             except Exception as error:
                 raise InputActionError(str(error)) from error
             self.state_machine.cancel_current(now)
+            self._reset_cast_recovery()
             self._reset_progress_tracking()
             self._reset_progress_entry()
             self.bar_valid_frames = 0
@@ -258,18 +268,11 @@ class AutomationCore:
 
         state = self.state_machine.state
         if state is FishingState.READY:
-            self._input(self.input_service.tap_f)
-            if packet is not None:
-                try:
-                    self.scene_recognizer.set_bite_baseline(packet.frame)
-                except Exception as error:
-                    raise VisionActionError(str(error)) from error
+            self._reset_cast_recovery()
+            self._send_cast(packet, now, trigger="round_start")
             self.state_machine.handle(Event.CAST_SENT, now)
-        elif state is FishingState.WAIT_BITE and observation.bite:
-            self._input(self.input_service.tap_f)
-            self.state_machine.handle(Event.REEL_SENT, now)
-            self._reset_progress_entry()
-            self.scene_recognizer.reset_progress_tracking()
+        elif state is FishingState.WAIT_BITE:
+            self._wait_for_bite(observation, packet, now)
         elif state is FishingState.WAIT_BAR:
             self._await_progress_entry(observation, packet, now)
         elif state is FishingState.CONTROL:
@@ -283,6 +286,93 @@ class AutomationCore:
             self.state_machine.handle(Event.INTERVAL_ELAPSED, now)
 
         return self.snapshot
+
+    def _wait_for_bite(
+        self,
+        observation: SceneObservation,
+        packet: FramePacket | None,
+        now: float,
+    ) -> None:
+        if self._cast_recovery_at is not None:
+            if now < self._cast_recovery_at:
+                return
+            self._send_cast(packet, now, trigger="ready_recovery")
+            return
+
+        if self._cast_sent_at is not None:
+            elapsed = now - self._cast_sent_at
+            ready_guard_active = (
+                _CAST_READY_GUARD_MIN
+                <= elapsed
+                <= _CAST_READY_GUARD_MAX
+            )
+            if ready_guard_active and observation.ready:
+                if self._cast_attempts >= _CAST_MAX_ATTEMPTS:
+                    self._record(
+                        "cast.recovery_exhausted",
+                        attempts=self._cast_attempts,
+                        elapsed_since_cast=elapsed,
+                        ready=observation.ready,
+                        bite=observation.bite,
+                    )
+                    self.pause(
+                        "连续三次抛竿均未被游戏接受",
+                        now,
+                        code="E_CAST",
+                    )
+                    return
+                self._set_bite_baseline(packet)
+                self._cast_recovery_at = now + _CAST_RECOVERY_DELAY
+                self._record(
+                    "cast.recovery_scheduled",
+                    failed_attempt=self._cast_attempts,
+                    next_attempt=self._cast_attempts + 1,
+                    delay_seconds=_CAST_RECOVERY_DELAY,
+                    scheduled_at=self._cast_recovery_at,
+                    elapsed_since_cast=elapsed,
+                    ambiguous_bite=observation.bite,
+                )
+                return
+
+        if observation.bite:
+            self._input(self.input_service.tap_f)
+            self.state_machine.handle(Event.REEL_SENT, now)
+            self._reset_progress_entry()
+            self.scene_recognizer.reset_progress_tracking()
+
+    def _send_cast(
+        self,
+        packet: FramePacket | None,
+        now: float,
+        *,
+        trigger: str,
+    ) -> None:
+        self._input(self.input_service.tap_f)
+        self._set_bite_baseline(packet)
+        self._cast_attempts += 1
+        self._cast_sent_at = now
+        self._cast_recovery_at = None
+        self._record(
+            "cast.attempt",
+            attempt=self._cast_attempts,
+            trigger=trigger,
+            sent_at=now,
+            verification_starts_at=now + _CAST_READY_GUARD_MIN,
+            verification_ends_at=now + _CAST_READY_GUARD_MAX,
+        )
+
+    def _set_bite_baseline(self, packet: FramePacket | None) -> None:
+        if packet is None:
+            return
+        try:
+            self.scene_recognizer.set_bite_baseline(packet.frame)
+        except Exception as error:
+            raise VisionActionError(str(error)) from error
+
+    def _reset_cast_recovery(self) -> None:
+        self._cast_attempts = 0
+        self._cast_sent_at = None
+        self._cast_recovery_at = None
 
     def _input(self, action: Callable[[], None]) -> None:
         with self._lock:
@@ -422,6 +512,7 @@ class AutomationCore:
             signal="click_succeeded",
         )
         self.state_machine.handle(Event.RESULT_CLICKED, now)
+        self._reset_cast_recovery()
         self._reset_result_dismissal()
 
     def _schedule_result_click(
