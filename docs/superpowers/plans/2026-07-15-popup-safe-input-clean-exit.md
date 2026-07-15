@@ -342,17 +342,17 @@ Get-FileHash -Algorithm SHA256 .\异环自动钓鱼V2.exe
 
 Expected: 两个哈希一致。
 
-- [ ] **Step 4: 更新长期规则、验收标准和当日进展记录**
+- [x] **Step 4: 更新长期规则、验收标准和当日进展记录**
 
 记录：输入守卫触发位置、Windows 弹窗后的安全暂停与人工继续流程、`E_CLEANUP`、测试总数、构建大小与 SHA256；提升权限烟雾和真实游戏弹窗复验标记为人工确认。
 
-- [ ] **Step 5: 提交文档和构建记录**
+- [x] **Step 5: 提交文档和构建记录**
 
 ```powershell
 git add AGENTS.md doc/验收标准.md doc/进展记录/2026-7-15.md docs/superpowers/plans/2026-07-15-popup-safe-input-clean-exit.md
 git commit -m "docs: record popup and exit hardening"
 ```
 
-- [ ] **Step 6: 合并 main 并删除任务分支**
+- [x] **Step 6: 合并 main 并删除任务分支**
 
 按 `superpowers:finishing-a-development-branch` 完成最终测试、切回 `main`、`--no-ff` 合并 `codex/fix-popup-exit`，复测后删除本地任务分支。未经用户确认不推送 GitHub，也不创建 Release。
