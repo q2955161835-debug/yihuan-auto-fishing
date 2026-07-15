@@ -24,7 +24,7 @@
 
 ## 下载与使用
 
-1. 从 [Releases](https://github.com/q2955161835-debug/yihuan-auto-fishing/releases) 下载最新已发布的 `异环自动钓鱼V2.exe`。
+1. 从 [Releases](https://github.com/q2955161835-debug/yihuan-auto-fishing/releases) 下载最新已发布的 `V2.exe`。
 2. 双击 EXE，并在 Windows UAC 提示中确认运行。
 3. 启动《异环》，进入可以钓鱼的画面。
 4. 在工具中设置目标次数，点击“绑定并开始”，并在 3 秒倒计时内切回游戏。

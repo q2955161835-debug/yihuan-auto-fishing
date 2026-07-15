@@ -100,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_v2.ps1
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -PythonPath try/output/clean-venv/Scripts/python.exe
 ```
 
-V1/V2 构建发布物分别为 `dist/异环自动钓鱼.exe` 与 `dist/异环自动钓鱼V2.exe`；V1 在 GitHub Release `v1.0.0` 留存，V2 的首次正式资产在 `v2.0.0` 留存，GitHub 最新已发布修复版为 `v2.0.4`。根目录与 `dist` 发布物均为 63,989,100 字节，SHA256 `402DC0003D0E5FC8E1C537D6B2D4096BF3D24E15E18CC8A7BAA0E135B4C4790E`；发布物保持 Git 忽略，仅作为 GitHub Release 资产上传。构建脚本必须可重复执行；烟雾 PowerShell 必须已提升。发布前除自动烟雾外，必须在无开发环境依赖的 Windows 会话中完成启动人工复核；未在 Windows 10 真机执行时必须明确标记待人工确认，不得只凭声明声称已实测兼容。
+V1/V2 构建发布物分别为 `dist/异环自动钓鱼.exe` 与 `dist/异环自动钓鱼V2.exe`；V1 在 GitHub Release `v1.0.0` 留存，V2 的首次正式资产在 `v2.0.0` 留存，GitHub 最新已发布修复版为 `v2.0.4`。根目录与 `dist` 发布物均为 63,989,100 字节，SHA256 `402DC0003D0E5FC8E1C537D6B2D4096BF3D24E15E18CC8A7BAA0E135B4C4790E`；发布物保持 Git 忽略，仅作为 GitHub Release 资产上传，远端资产名为 `V2.exe`。构建脚本必须可重复执行；烟雾 PowerShell 必须已提升。发布前除自动烟雾外，必须在无开发环境依赖的 Windows 会话中完成启动人工复核；未在 Windows 10 真机执行时必须明确标记待人工确认，不得只凭声明声称已实测兼容。
 
 ## 验收标准
 
