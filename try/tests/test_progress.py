@@ -191,6 +191,35 @@ def test_recovery_prefers_valid_short_bar_over_nearby_tiny_noise() -> None:
     assert abs(result.observation.yellow_x - 210 / 300) < 0.02
 
 
+def test_prefers_long_saturated_green_run_over_blue_background_fragments() -> None:
+    image = np.zeros((216, 1332, 3), dtype=np.uint8)
+    progress_green = tuple(
+        int(value)
+        for value in cv2.cvtColor(
+            np.uint8([[[83, 192, 186]]]),
+            cv2.COLOR_HSV2BGR,
+        )[0, 0]
+    )
+    blue_background = tuple(
+        int(value)
+        for value in cv2.cvtColor(
+            np.uint8([[[102, 143, 107]]]),
+            cv2.COLOR_HSV2BGR,
+        )[0, 0]
+    )
+    cv2.rectangle(image, (264, 93), (454, 106), progress_green, -1)
+    cv2.line(image, (455, 99), (775, 99), blue_background, 1)
+    cv2.rectangle(image, (800, 93), (840, 106), blue_background, -1)
+    cv2.rectangle(image, (1129, 86), (1138, 112), YELLOW_BGR, -1)
+
+    result = ProgressRecognizer().analyze(image, 1.0)
+
+    assert result.observation is not None
+    assert result.observation.green_left == pytest.approx(264 / 1332, abs=0.01)
+    assert result.observation.green_right == pytest.approx(455 / 1332, abs=0.01)
+    assert result.observation.yellow_x == pytest.approx(1133.5 / 1332, abs=0.01)
+
+
 def test_controller_moves_toward_inner_safe_band() -> None:
     controller = ProgressController(center_tolerance_ratio=0.10)
     observations = [
