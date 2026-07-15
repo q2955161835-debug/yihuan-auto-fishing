@@ -33,7 +33,7 @@
 - Consumes: `WindowService.is_foreground(bound: BoundWindow) -> bool`、`WindowService.own_hwnd`。
 - Produces: `InputTargetUnavailable`、`SafeInput.set_target_guard(guard)`、`WindowService.is_control_foreground() -> bool`。
 
-- [ ] **Step 1: 写 F 延迟期间被弹窗抢焦点的失败测试**
+- [x] **Step 1: 写 F 延迟期间被弹窗抢焦点的失败测试**
 
 ```python
 def test_target_guard_blocks_f_when_focus_is_lost_during_pre_press_delay():
@@ -52,7 +52,7 @@ def test_target_guard_blocks_f_when_focus_is_lost_during_pre_press_delay():
     assert backend.events == []
 ```
 
-- [ ] **Step 2: 写失焦后仍允许释放的失败测试**
+- [x] **Step 2: 写失焦后仍允许释放的失败测试**
 
 ```python
 def test_target_guard_never_blocks_release_after_focus_loss():
@@ -68,13 +68,13 @@ def test_target_guard_never_blocks_release_after_focus_loss():
     assert backend.events == [("down", "A"), ("up", "A")]
 ```
 
-- [ ] **Step 3: 运行定向测试并确认按缺失行为失败**
+- [x] **Step 3: 运行定向测试并确认按缺失行为失败**
 
 Run: `py -3.13 -m pytest try/tests/test_safe_input.py -q`
 
 Expected: FAIL，`SafeInput` 尚无 `set_target_guard` / `InputTargetUnavailable`。
 
-- [ ] **Step 4: 实现最小输入守卫**
+- [x] **Step 4: 实现最小输入守卫**
 
 ```python
 class InputTargetUnavailable(InputFailure):
@@ -100,7 +100,7 @@ def _ensure_target_available(self) -> None:
 
 `_down()` 每次调用（包括按键已处于 held 集合）先调用守卫；`click()` 在记录及物理点击前调用守卫；`_up()`、`release_all()` 和 `mouse_up()` 不调用守卫。
 
-- [ ] **Step 5: 写引擎绑定守卫及错误分类失败测试**
+- [x] **Step 5: 写引擎绑定守卫及错误分类失败测试**
 
 ```python
 class GuardedRecordingInput(RecordingInput):
@@ -148,7 +148,7 @@ def test_control_window_foreground_is_user_pause_without_diagnostic(tmp_path):
     assert reporter.requests == []
 ```
 
-- [ ] **Step 6: 在窗口与引擎边界接线**
+- [x] **Step 6: 在窗口与引擎边界接线**
 
 ```python
 def is_control_foreground(self) -> bool:
@@ -162,13 +162,13 @@ def _input_target_is_foreground(self) -> bool:
 
 `AutomationEngine.bind()` 调用可选 `set_target_guard(self._input_target_is_foreground)`；`AutomationCore._input()` 将 `InputTargetUnavailable` 映射为专用 `ForegroundLostError`。worker 对该异常调用统一前台中断处理：控制窗口前台使用 `E_USER_PAUSE` 且 `save_diagnostic=False`；其他窗口使用 `E_WINDOW` 和明确的 Windows 弹窗提示。
 
-- [ ] **Step 7: 运行输入、窗口、引擎定向测试**
+- [x] **Step 7: 运行输入、窗口、引擎定向测试**
 
 Run: `py -3.13 -m pytest try/tests/test_safe_input.py try/tests/test_capture_window.py try/tests/test_engine.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 8: 提交输入安全阶段**
+- [x] **Step 8: 提交输入安全阶段**
 
 ```powershell
 git add src/auto_fishing/platform/input.py src/auto_fishing/platform/windowing.py src/auto_fishing/automation/engine.py try/tests/test_safe_input.py try/tests/test_capture_window.py try/tests/test_engine.py
@@ -188,7 +188,7 @@ git commit -m "fix: guard input against foreground popups"
 - Consumes: `DiagnosticBundleService.request_report(report_type, code, detail, state, frame, context)`、`MainWindow.controller.shutdown()`。
 - Produces: 自动清理诊断 `E_CLEANUP`；正常退出不抛清理异常组。
 
-- [ ] **Step 1: 写失效屏幕键盘句柄的失败测试**
+- [x] **Step 1: 写失效屏幕键盘句柄的失败测试**
 
 ```python
 def test_win32_api_treats_invalid_window_handle_as_already_closed(monkeypatch):
@@ -201,13 +201,13 @@ def test_win32_api_treats_invalid_window_handle_as_already_closed(monkeypatch):
     assert user32.messages == [(55, 0x0010)]
 ```
 
-- [ ] **Step 2: 确认测试因错误 1400 被抛出而失败**
+- [x] **Step 2: 确认测试因错误 1400 被抛出而失败**
 
 Run: `py -3.13 -m pytest try/tests/test_on_screen_keyboard.py -q`
 
 Expected: FAIL，当前实现抛 `OnScreenKeyboardError`。
 
-- [ ] **Step 3: 将错误 1400 视为已关闭**
+- [x] **Step 3: 将错误 1400 视为已关闭**
 
 ```python
 ERROR_INVALID_WINDOW_HANDLE = 1400
@@ -218,7 +218,7 @@ if not self.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0):
         return
 ```
 
-- [ ] **Step 4: 写退出顺序与清理诊断的失败测试**
+- [x] **Step 4: 写退出顺序与清理诊断的失败测试**
 
 ```python
 def test_close_stops_controller_before_saving_settings(root):
@@ -264,7 +264,7 @@ def test_application_reports_cleanup_failure_and_exits_cleanly():
     )
 ```
 
-- [ ] **Step 5: 先停止控制器，再保存设置并销毁窗口**
+- [x] **Step 5: 先停止控制器，再保存设置并销毁窗口**
 
 ```python
 try:
@@ -276,7 +276,7 @@ finally:
         self.root.destroy()
 ```
 
-- [ ] **Step 6: 清理失败写诊断但不重新抛成退出崩溃**
+- [x] **Step 6: 清理失败写诊断但不重新抛成退出崩溃**
 
 `Application._cleanup()` 在关闭 `diagnostic_reporter` 前，若已有清理错误则请求一次：
 
@@ -293,13 +293,13 @@ services.diagnostic_reporter.request_report(
 
 `Application.run()` 仍重新抛运行期异常；只有“主循环正常结束、仅关闭清理失败”时记录并正常返回。
 
-- [ ] **Step 7: 运行退出与屏幕键盘定向测试**
+- [x] **Step 7: 运行退出与屏幕键盘定向测试**
 
 Run: `py -3.13 -m pytest try/tests/test_on_screen_keyboard.py try/tests/test_ui_smoke.py try/tests/test_v2_diagnostics.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 8: 提交退出阶段**
+- [x] **Step 8: 提交退出阶段**
 
 ```powershell
 git add src/auto_fishing/platform/on_screen_keyboard.py src/auto_fishing/ui/main_window.py src/auto_fishing/app.py try/tests/test_on_screen_keyboard.py try/tests/test_ui_smoke.py
@@ -319,19 +319,19 @@ git commit -m "fix: exit cleanly after Windows interruptions"
 - Consumes: Task 1 和 Task 2 的最终行为。
 - Produces: 可验证的 V2 候选构建、SHA256 和人工验收清单。
 
-- [ ] **Step 1: 运行完整 pytest 回归**
+- [x] **Step 1: 运行完整 pytest 回归**
 
 Run: `py -3.13 -m pytest try/tests -q`
 
 Expected: 现有 419 项加新增回归全部 PASS。
 
-- [ ] **Step 2: 构建 V2 单文件并验证清单**
+- [x] **Step 2: 构建 V2 单文件并验证清单**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/build_v2.ps1 -PythonPath C:\Users\29551\AppData\Local\Programs\Python\Python313\python.exe`
 
 Expected: 测试通过，生成 `dist/异环自动钓鱼V2.exe`，并验证 `requireAdministrator`、`uiAccess=false`、`PerMonitorV2`、`true/pm`。
 
-- [ ] **Step 3: 同步根目录候选并核对 SHA256**
+- [x] **Step 3: 同步根目录候选并核对 SHA256**
 
 使用 PowerShell `Copy-Item -LiteralPath` 同步构建产物，随后运行：
 
