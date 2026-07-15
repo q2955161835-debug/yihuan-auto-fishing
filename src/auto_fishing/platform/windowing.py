@@ -100,6 +100,8 @@ class WindowService:
         native_user32 = user32 is None
         if user32 is None:
             user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetForegroundWindow.argtypes = ()
+            user32.GetForegroundWindow.restype = wintypes.HWND
             user32.SetProcessDpiAwarenessContext.argtypes = (ctypes.c_void_p,)
             user32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
             user32.SetProcessDPIAware.argtypes = ()
@@ -248,6 +250,10 @@ class WindowService:
 
     def is_foreground(self, bound: BoundWindow) -> bool:
         return int(self.user32.GetForegroundWindow() or 0) == bound.hwnd
+
+    def is_control_foreground(self) -> bool:
+        foreground = int(self.user32.GetForegroundWindow() or 0)
+        return self.own_hwnd is not None and foreground == self.own_hwnd
 
     def exclude_from_capture(self, hwnd: int) -> bool:
         return bool(
