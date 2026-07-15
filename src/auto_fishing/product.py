@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 V1_DATA_DIR = Path(r"D:\29551\异环自动钓鱼数据")
-V2_VERSION = "2.0.2"
+V2_VERSION = "2.0.3"
 
 
 @dataclass(frozen=True)

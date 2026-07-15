@@ -76,6 +76,11 @@ class ProgressRecognizer:
             np.array((70, 80, 100), dtype=np.uint8),
             np.array((105, 255, 255), dtype=np.uint8),
         )
+        solid_green_mask = cv2.inRange(
+            hsv,
+            np.array((70, 155, 100), dtype=np.uint8),
+            np.array((105, 255, 255), dtype=np.uint8),
+        )
         yellow_mask = cv2.inRange(
             hsv,
             np.array((18, 40, 120), dtype=np.uint8),
@@ -83,6 +88,11 @@ class ProgressRecognizer:
         )
         green_mask = cv2.morphologyEx(
             green_mask,
+            cv2.MORPH_CLOSE,
+            np.ones((1, 3), dtype=np.uint8),
+        )
+        solid_green_mask = cv2.morphologyEx(
+            solid_green_mask,
             cv2.MORPH_CLOSE,
             np.ones((1, 3), dtype=np.uint8),
         )
@@ -109,6 +119,10 @@ class ProgressRecognizer:
         ]
         green_runs_by_line = [
             _runs(green_mask[row] > 0, 0)
+            for row in rows
+        ]
+        solid_green_runs_by_line = [
+            _runs(solid_green_mask[row] > 0, 0)
             for row in rows
         ]
         reference = self._history[-1] if self._history else None
@@ -138,18 +152,28 @@ class ProgressRecognizer:
         )
         candidates_by_line = [
             (
-                _line_candidates(
-                    green_runs,
-                    [selected_yellow],
-                    image_width,
-                )
+                [
+                    candidate
+                    for candidate in _line_candidates(
+                        green_runs,
+                        [selected_yellow],
+                        image_width,
+                    )
+                    if _has_minimum_solid_green_support(
+                        candidate,
+                        solid_green_runs,
+                    )
+                ]
                 + _independent_line_candidates(
-                    green_runs,
+                    solid_green_runs,
                     selected_yellow,
                     image_width,
                 )
             )
-            for green_runs in green_runs_by_line
+            for green_runs, solid_green_runs in zip(
+                green_runs_by_line,
+                solid_green_runs_by_line,
+            )
         ]
         valid_scanlines = sum(bool(candidates) for candidates in candidates_by_line)
         candidate_count = sum(len(candidates) for candidates in candidates_by_line)
@@ -440,6 +464,21 @@ def _independent_line_candidates(
         )
         for green_left, green_right in green_runs
     ]
+
+
+def _has_minimum_solid_green_support(
+    candidate: _LineCandidate,
+    solid_green_runs: list[tuple[int, int]],
+) -> bool:
+    supported_width = sum(
+        max(
+            0,
+            min(candidate.green_right, run_right)
+            - max(candidate.green_left, run_left),
+        )
+        for run_left, run_right in solid_green_runs
+    )
+    return supported_width >= candidate.minimum_width
 
 
 def _select_yellow_run(

@@ -1637,7 +1637,7 @@ def test_application_builds_on_screen_keyboard_input_backend(tmp_path) -> None:
 def test_v2_profile_uses_local_app_data_and_explicit_version(tmp_path) -> None:
     profile = v2_profile({"LOCALAPPDATA": str(tmp_path)})
 
-    assert profile.version == "2.0.2"
+    assert profile.version == "2.0.3"
     assert profile.window_title == "异环自动钓鱼 V2"
     assert profile.data_dir == tmp_path / "异环自动钓鱼V2"
     assert profile.use_disk_runtime_log is False
